@@ -27,21 +27,18 @@ Playback controls depend on the capabilities exposed by each app through MPRIS. 
 - `cava`, `curl`, Python 3, and Bash.
 - An MPRIS-compatible media player or browser session.
 - Optional: `mpv-mpris` for MPV playback integration.
-- Development checks: Node.js and `qmllint`.
 
 CAVA analyzes the **default playback output**, so other applications playing through that output also affect the visualization. It does not record audio to disk or read the microphone. Artwork is fetched from the player-provided URL and cached locally.
 
-## Install from this checkout
+## Install
+
+Use Omarchy’s plugin manager:
 
 ```bash
-git clone https://github.com/AlwaysRead/Omarchy-music-flow.git
-cd Omarchy-music-flow
-./install.sh
+omarchy plugin add https://github.com/AlwaysRead/Omarchy-music-flow.git --enable
 ```
 
-The installer copies the runtime files into `~/.config/omarchy/plugins/custom.media/`, adds the widget to the bar, disables the stock `omarchy.media` widget, validates the plugin, and restarts the shell. If MPV and a supported MPRIS module are installed, it also links that module into the user’s MPV scripts directory.
-
-The plugin ID remains `custom.media` for compatibility. Do not install upstream and this fork under that same ID at the same time.
+The plugin ID is `custom.media`. It replaces the stock `omarchy.media` widget. The upstream plugin uses the same ID, so install only one version at a time. MPV requires an existing MPRIS integration such as `mpv-mpris`.
 
 ## Work directly from a checkout
 
@@ -86,19 +83,14 @@ Valid animation values are `wave`, `bars`, `dots`, `particles`, `equalizer`, and
 
 ## Update or remove
 
-After pulling changes from this fork into your checkout, synchronize it with:
+For a plugin installed through Omarchy:
 
 ```bash
-./update.sh
+omarchy plugin update custom.media
+omarchy plugin remove custom.media
 ```
 
-To remove the installed widget and restore the stock media widget:
-
-```bash
-./uninstall.sh
-```
-
-Uninstall backs up the plugin directory or symlink instead of deleting it. These scripts change bar configuration and restart the shell. Automatic upstream updates can replace fork changes; use your own fork as the update source.
+For a development checkout linked into the plugin directory, pull changes in that checkout and restart the shell. Keep local edits committed before pulling. This repository uses Omarchy’s plugin manager rather than custom installation scripts.
 
 ## Repository layout
 
@@ -110,36 +102,10 @@ AudioSpectrum.js               Audio attack/release envelope
 manifest.json                  Omarchy plugin metadata
 config/visualizer.conf         CAVA configuration
 local-i18n/en.json              Interface strings
-scripts/configure_bar.py       Shared bar configuration editor
-scripts/install_files.sh       Shared runtime file deployment
-install.sh / update.sh          Installation and synchronization
-uninstall.sh                   Backup and restore stock media widget
-tests/customizations.test.cjs   Preference and audio-envelope tests
-tests/deployment.test.py        Clean runtime-deployment test
-tests/playback-integration.py   Isolated MPRIS transition/seek test
-.github/workflows/checks.yml    Automated tests and syntax checks
 README.md / CREDITS.md / LICENSE
 ```
 
-QML entry points stay at the repository root because the shell loads them from the plugin manifest. Configuration, translations, maintenance helpers, and tests have their own directories. Screenshots and preview assets are intentionally omitted.
-
-## Check changes
-
-```bash
-node --test tests/*.test.cjs
-python3 tests/deployment.test.py
-qmllint BarWidget.qml Service.qml
-bash -n install.sh update.sh uninstall.sh scripts/install_files.sh
-omarchy plugin validate .
-```
-
-The GitHub workflow runs unit/deployment tests and syntax checks on pushes and pull requests. On an Omarchy development machine with PyGObject installed, run the isolated playback integration test:
-
-```bash
-dbus-run-session -- /usr/bin/python tests/playback-integration.py
-```
-
-This starts fake MPRIS players on a private session bus and checks playing, paused, stopped, player switching, closing, visibility, play/pause delivery, and seeking without controlling your desktop’s players. The UI updates position only while its popup is open, following [Quickshell’s position API](https://quickshell.org/docs/v0.2.1/types/Quickshell.Services.Mpris/MprisPlayer/#position).
+QML entry points stay at the repository root because the shell loads them from the plugin manifest. Only runtime code, configuration, translations, documentation, and attribution are included. Screenshots, preview assets, tests, CI workflows, and custom maintenance scripts are omitted.
 
 ## License
 
