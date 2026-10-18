@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
   "id": "custom.media",
-  "name": "Music Flow",
+  "name": "Music Flow (customized fork)",
   "version": "1.0.0",
   "author": "Clifford Baidoo",
   "license": "MIT",
-  "description": "MPRIS media visualizer and player controller",
+  "description": "Customized fork of Clifford Baidoo\u2019s Music Flow with CAVA visualization and saved display preferences",
   "kinds": [
     "service",
     "bar-widget"

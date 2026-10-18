@@ -1,149 +1,146 @@
-# 🌊 Omarchy Music Flow
+# Music Flow — customized fork
 
-A sleek, ricer-styled **Music Flow** widget and floating **Media Controller** for [Omarchy Linux](https://omarchy.org/) (Quickshell / Hyprland).
+A media widget for the Omarchy top bar, with a floating player and a live CAVA audio visualizer.
 
-Featuring a smooth, borderless **dual-harmonic sound wave visualizer** on your status bar and a **dedicated floating Player & Multi-Source Selector** window.
+Maintained fork: [AlwaysRead/Omarchy-music-flow](https://github.com/AlwaysRead/Omarchy-music-flow).
 
----
+Forked from [Clifford Baidoo’s Omarchy Music Flow](https://github.com/Clifford-Baidoo/Omarchy-music-flow). Credit for the original plugin belongs to Clifford Baidoo and the upstream contributors. See [CREDITS.md](CREDITS.md) for provenance and [LICENSE](LICENSE) for the preserved upstream MIT license.
 
-## 📸 Screenshots
+## Features in this fork
 
-### 🎛️ Live Setup & Multi-Flow Mode Switcher
-*Full desktop showcase: Bar visualizer in Pure Flow mode alongside the floating player panel, 6-mode visualizer switcher, and YouTube source detection.*
-![Omarchy Music Flow Live Setup](assets/update.png)
+- Six audio-reactive styles: **Wave, Mirror bars, Dots, Sparks, Equalizer, Filled wave**.
+- Real 16-band CAVA spectrum at 30 frames per second, with quick attack and gentler release.
+- Theme accent colors and consistent corners; stronger animation contrast when all bar display options are off.
+- Independent bar controls for artwork, app logo, and track text. Animation and display choices survive shell restarts.
+- Artwork at the left of the bar, separate from the animation, with a player-icon fallback when artwork is loading or unavailable.
+- Floating player with artwork, metadata, previous/next controls, play/pause, and per-app volume when a matching PipeWire stream is available.
+- Player cards with individual play/pause controls and hover scrolling for long track names.
+- Elapsed/total track time and seeking for players that support position and duration. Non-seekable tracks show read-only progress; unknown-duration streams omit it.
+- Widget visible while playing or paused; hidden when playback stops or the player closes.
 
-### 🎵 Status Bar Soundwave Flow
-*Seamless, borderless audio wave flow with marquee song title and artist on the top bar.*
-![Omarchy Music Flow Bar](assets/bar-flow.png)
+Playback controls depend on the capabilities exposed by each app through MPRIS. Website names are detected from available media metadata; a browser wrapper may therefore appear as Chrome or Firefox.
 
-### 🎛️ Floating Player & Multi-Source Selector Panel
-*Dedicated floating media window with album artwork, playback deck, and one-click source switching (Spotify, Zen / Firefox / Chrome, MPV, etc.).*
-![Omarchy Music Player Panel](assets/player-panel.png)
+## Requirements
 
----
+- Omarchy with its Quickshell shell and Hyprland session.
+- PipeWire/WirePlumber and a PulseAudio-compatible server such as `pipewire-pulse`.
+- `cava`, `curl`, Python 3, and Bash.
+- An MPRIS-compatible media player or browser session.
+- Optional: `mpv-mpris` for MPV playback integration.
+- Development checks: Node.js and `qmllint`.
 
-## ✨ Features
+CAVA analyzes the **default playback output**, so other applications playing through that output also affect the visualization. It does not record audio to disk or read the microphone. Artwork is fetched from the player-provided URL and cached locally.
 
-- 🎵 **Pure Soundwave Visualizer Flow**: Dual-layer harmonic wave oscillating horizontally across the status bar in real-time with your theme's accent color whenever audio is active.
-- 🌐 **Universal Browser & Web Audio Support**: Fully picks up audio from **Zen Browser**, **Firefox**, **Brave**, **Google Chrome**, **Chromium**, and web services (**YouTube**, **SoundCloud**, **Twitch**, **Bandcamp**, **Netflix**, HTML5 media, and WebAudio).
-- 🌸 **Native Seanime & Anime Video Support**: Seamlessly tracks **Seanime** (both Desktop App and Web player), **MPV**, **VLC**, and **Celluloid** with automatic anime filename & tag cleaning (`[SubsPlease]`, `(1080p)`, etc.).
-- 🔊 **PipeWire Direct Stream Detection**: Automatically captures active audio streams even if an application does not natively implement MPRIS D-Bus.
-- 🎨 **Minimalist & Borderless**: Clean, transparent integration that seamlessly blends with your top bar without visual clutter.
-- 📜 **Smooth Marquee Scroll**: Track title and artist (`Title · Artist`) with initial pause and smooth scrolling when names are long.
-- 🎛️ **Dedicated Floating Media Player Panel**:
-  - High-resolution album artwork preview / source badge.
-  - Track metadata (Title, Artist, Album, Source).
-  - Comfortable playback controls (**Previous**, **Play / Pause**, **Next**).
-  - **Multi-Source Selector (`󱘖 SELECT PLAYER / SOURCE`)**: Instantly switch between running players with one click.
-- 🗕 **Minimizable Compact Mode**: Collapses smoothly into a clean standalone status bar icon (**`󰝚`**) matching the battery and speaker widgets.
-- 🖱️ **Intuitive Gestures**:
-  - **Left-Click**: Open/close the dedicated floating Player & Source Selector window.
-  - **Middle-Click**: Toggle Play / Pause.
-  - **Scroll Wheel**: Scroll up/down over the widget to skip backward/forward tracks.
-
----
-
-## 🚀 Installation
-
-### Option 1: Native Omarchy Plugin Command (Recommended)
-
-Install directly with the Omarchy CLI in a single command:
+## Install from this checkout
 
 ```bash
-omarchy plugin add https://github.com/Clifford-Baidoo/omarchy-music-flow.git --enable
-```
-
-### Option 2: Clone & Run Installer
-
-```bash
-git clone https://github.com/Clifford-Baidoo/omarchy-music-flow.git
-cd omarchy-music-flow
-chmod +x install.sh update.sh uninstall.sh
+git clone https://github.com/AlwaysRead/Omarchy-music-flow.git
+cd Omarchy-music-flow
 ./install.sh
 ```
 
-The installer will:
-1. Copy the plugin files to `~/.config/omarchy/plugins/custom.media/`.
-2. Automatically enable MPV MPRIS integration for video & media playback.
-3. Automatically configure your bar layout in `~/.config/omarchy/shell.json`.
-4. Restart `omarchy-shell` to apply changes instantly.
+The installer copies the runtime files into `~/.config/omarchy/plugins/custom.media/`, adds the widget to the bar, disables the stock `omarchy.media` widget, validates the plugin, and restarts the shell. If MPV and a supported MPRIS module are installed, it also links that module into the user’s MPV scripts directory.
 
----
+The plugin ID remains `custom.media` for compatibility. Do not install upstream and this fork under that same ID at the same time.
 
-## 🔄 Updating
+## Work directly from a checkout
 
-### Option 1: Native Omarchy CLI (Recommended)
+The local development setup uses a symlink:
 
-```bash
-omarchy plugin update custom.media
+```text
+~/.config/omarchy/plugins/custom.media -> ~/Projects/Omarchy-music-flow
 ```
 
-### Option 2: Synchronize Local Files
+Edit the checkout and run `omarchy restart shell` if the running widget retains cached code. Keep an existing plugin directory backed up before replacing it with a symlink.
+
+## Controls
+
+| Location | Action | Result |
+| --- | --- | --- |
+| Bar | Left-click | Open or close the player |
+| Bar | Middle-click | Play or pause |
+| Bar | Right-click | Toggle track text and save the choice |
+| Bar | Scroll up / down | Previous / next track |
+| Floating player | Settings gear | Animation and bar display options |
+| Player card | Click card | Select that player |
+| Player card | Play/pause icon | Control that specific player |
+| Player card | Hover | Scroll overflowing track text |
+
+The app-logo setting affects only the bar. Logos remain visible in the floating player. The thumbnail setting controls the bar thumbnail slot, including its fallback icon.
+
+## Preferences
+
+Preferences live in the widget’s entry under `bar.layout` in `~/.config/omarchy/shell.json`:
+
+```json
+{
+  "id": "custom.media",
+  "showBarThumbnail": true,
+  "showAppLogo": false,
+  "showText": true,
+  "visualizerMode": "wave"
+}
+```
+
+Valid animation values are `wave`, `bars`, `dots`, `particles`, `equalizer`, and `ribbon`. Settings can be changed in the popup or with `omarchy bar set custom.media <setting> <value> --json`.
+
+## Update or remove
+
+After pulling changes from this fork into your checkout, synchronize it with:
 
 ```bash
-cd omarchy-music-flow
 ./update.sh
 ```
 
-The updater script will:
-1. Synchronize all plugin files to `~/.config/omarchy/plugins/custom.media/`.
-2. Clean up any deprecated legacy plugin directories.
-3. Validate plugin schema and verify bar layout.
-4. Reload `omarchy-shell` with the updated features and fixes.
-
----
-
-## 🗑️ Uninstallation
-
-To remove Music Flow and restore the default media widget:
+To remove the installed widget and restore the stock media widget:
 
 ```bash
-cd omarchy-music-flow
 ./uninstall.sh
 ```
 
----
+Uninstall backs up the plugin directory or symlink instead of deleting it. These scripts change bar configuration and restart the shell. Automatic upstream updates can replace fork changes; use your own fork as the update source.
 
-## 🕹️ Controls & Shortcuts
+## Repository layout
 
-| Action | Bar Widget Gesture | Floating Player Window |
-| :--- | :--- | :--- |
-| **Open / Close Panel** | `Left-Click` | `Click Outside` / `ESC` |
-| **Toggle Visualizer Text** | `Right-Click` | Flow Mode Row / Text Toggle |
-| **Play / Pause** | `Middle-Click` | Center Button (`󰏤` / `󰐊`) |
-| **Next Track** | `Scroll Down` | Forward Button (`󰒭`) |
-| **Previous Track** | `Scroll Up` | Back Button (`󰒮`) |
-| **Switch Player / Source** | Via Floating Panel | Click any player card in list |
-
----
-
-## 📂 File Structure
-
-```
-omarchy-music-flow/
-├── assets/
-│   ├── bar-flow.png      # Screenshot of bar visualizer flow
-│   └── player-panel.png  # Screenshot of floating player & source switcher
-├── BarWidget.qml         # Status bar music flow & floating PopupCard panel
-├── Service.qml           # MPRIS audio service & multi-source coordinator
-├── MediaModel.js         # DBus player detection & metadata formatting
-├── manifest.json         # Omarchy shell plugin manifest
-├── install.sh            # Automated installer script
-├── update.sh             # Automated updater script
-├── uninstall.sh          # Automated uninstaller script
-└── README.md             # Documentation & screenshots
+```text
+BarWidget.qml                  Bar widget and floating player
+Service.qml                    MPRIS, PipeWire, artwork, and CAVA service
+MediaModel.js                  Player matching and metadata helpers
+AudioSpectrum.js               Audio attack/release envelope
+manifest.json                  Omarchy plugin metadata
+config/visualizer.conf         CAVA configuration
+local-i18n/en.json              Interface strings
+scripts/configure_bar.py       Shared bar configuration editor
+scripts/install_files.sh       Shared runtime file deployment
+install.sh / update.sh          Installation and synchronization
+uninstall.sh                   Backup and restore stock media widget
+tests/customizations.test.cjs   Preference and audio-envelope tests
+tests/deployment.test.py        Clean runtime-deployment test
+tests/playback-integration.py   Isolated MPRIS transition/seek test
+.github/workflows/checks.yml    Automated tests and syntax checks
+README.md / CREDITS.md / LICENSE
 ```
 
----
+QML entry points stay at the repository root because the shell loads them from the plugin manifest. Configuration, translations, maintenance helpers, and tests have their own directories. Screenshots and preview assets are intentionally omitted.
 
-## 🛠️ Requirements
+## Check changes
 
-- [Omarchy](https://omarchy.org/) (Arch Linux + Hyprland + Quickshell)
-- PipeWire / WirePlumber
-- Any media source (Spotify, Zen, Firefox, Chrome, Brave, Seanime, MPV, cliamp, VLC, etc.)
+```bash
+node --test tests/*.test.cjs
+python3 tests/deployment.test.py
+qmllint BarWidget.qml Service.qml
+bash -n install.sh update.sh uninstall.sh scripts/install_files.sh
+omarchy plugin validate .
+```
 
----
+The GitHub workflow runs unit/deployment tests and syntax checks on pushes and pull requests. On an Omarchy development machine with PyGObject installed, run the isolated playback integration test:
 
-## 📄 License
+```bash
+dbus-run-session -- /usr/bin/python tests/playback-integration.py
+```
 
-MIT License. Feel free to use, modify, and rice to your heart's content!
+This starts fake MPRIS players on a private session bus and checks playing, paused, stopped, player switching, closing, visibility, play/pause delivery, and seeking without controlling your desktop’s players. The UI updates position only while its popup is open, following [Quickshell’s position API](https://quickshell.org/docs/v0.2.1/types/Quickshell.Services.Mpris/MprisPlayer/#position).
+
+## License
+
+MIT, with the original copyright notice retained. See [LICENSE](LICENSE) and [CREDITS.md](CREDITS.md).

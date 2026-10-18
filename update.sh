@@ -54,35 +54,8 @@ fi
 
 # 3. Copy updated plugin files
 #
-# Routed through a fresh mktemp name + mv instead of `cp -f src dest`
-# directly: `cp -f` follows a symlink at the destination and overwrites
-# whatever it points to (verified), so a same-user process that plants one
-# at e.g. TARGET_DIR/BarWidget.qml once would get it silently and
-# deterministically corrupted, no race required, on every update. `mv`
-# (rename) never follows a symlink at the destination - it replaces the
-# directory entry itself - so landing the new content there first and
-# swapping it into place closes this off.
-PLUGIN_TMP_FILES=()
-cleanup_plugin_tmp_files() {
-    local f
-    for f in "${PLUGIN_TMP_FILES[@]:-}"; do
-        [ -n "${f}" ] && rm -f "${f}"
-    done
-}
-trap cleanup_plugin_tmp_files EXIT
-
-install_plugin_file() {
-    local src="$1" name="$2" tmp
-    tmp=$(mktemp -p "${TARGET_DIR}" ".${name}.XXXXXX")
-    PLUGIN_TMP_FILES+=("${tmp}")
-    cp -f "${src}" "${tmp}"
-    chmod --reference="${src}" "${tmp}"
-    mv -f "${tmp}" "${TARGET_DIR}/${name}"
-}
-install_plugin_file "${SCRIPT_DIR}/BarWidget.qml" "BarWidget.qml"
-install_plugin_file "${SCRIPT_DIR}/Service.qml" "Service.qml"
-install_plugin_file "${SCRIPT_DIR}/MediaModel.js" "MediaModel.js"
-install_plugin_file "${SCRIPT_DIR}/manifest.json" "manifest.json"
+# Shared deployment includes every runtime dependency and preserves attribution.
+source "${SCRIPT_DIR}/scripts/install_files.sh"
 
 echo -e "${BLUE}==>${NC} Plugin files synchronized to: ${TARGET_DIR}"
 

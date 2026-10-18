@@ -1,4 +1,6 @@
+import qs.Commons as PluginCommons
 import QtQuick
+import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
 import Quickshell.Services.Mpris
@@ -11,8 +13,32 @@ BarWidget {
   moduleName: "custom.media"
 
   property var service: null
-  property string visualizerMode: "wave" // "wave", "bars", "dots", "particles", "pulse"
-  property bool showText: true           // Toggle track title / artist text in bar capsule
+  property string visualizerMode: {
+    var mode = setting("visualizerMode", "wave")
+    return ["wave", "bars", "dots", "particles", "equalizer", "ribbon"].indexOf(mode) >= 0 ? mode : "wave"
+  }
+  property bool showBarThumbnail: setting("showBarThumbnail", true) === true
+  property bool showAppLogo: setting("showAppLogo", true) === true
+  Process { id: appLogoPreference }
+  Process { id: thumbnailPreference }
+  Process { id: textPreference }
+  Process { id: animationPreference }
+  property bool showText: setting("showText", true) === true
+
+  function toggleTrackText() {
+    if (textPreference.running) return
+    root.showText = !root.showText
+    textPreference.command = ["omarchy", "bar", "set", "custom.media", "showText", root.showText ? "true" : "false", "--json"]
+    textPreference.running = true
+  }
+
+  function selectAnimation(mode) {
+    if (animationPreference.running) return
+    root.visualizerMode = mode
+    animationPreference.command = ["omarchy", "bar", "set", "custom.media", "visualizerMode", mode, "--json"]
+    animationPreference.running = true
+    waveCanvas.requestPaint()
+  }
 
   // The original repo registered this plugin under a per-user id
   // (${USER_NAME}.media) before this fork switched to the fixed
@@ -102,35 +128,31 @@ BarWidget {
     if (mediaService && typeof mediaService.toggleMute === "function") mediaService.toggleMute()
   }
 
-  // While playing, drive amplitude from the active player's real PipeWire peak level
-  // (mediaService.audioLevel) so all visualizer modes react to actual loudness instead of
-  // a constant. Falls back to the old fixed energy when no matching PipeWire stream could
-  // be found for the player at all. Paused/idle keep the ambient drift levels.
-  //
-  // audioGain was 2.4, which sounds like a modest boost but isn't: live-sampled
-  // mediaService.audioLevel for ordinary loud playback (a YouTube video in Chromium)
-  // sat in the 0.33-0.86 range, and 2.4x of that clips the Math.min(1.0, ...) ceiling
-  // for the overwhelming majority of samples (14/15 in one live capture) - the exact
-  // same constant 1.0 the "no live data" branch above returns. So the genuinely
-  // reactive path was visually indistinguishable from the ambient fallback for most
-  // real playback, which is what read as "it's falling back" even though
-  // hasLiveAudioLevel/fallbackPeakActive correctly reported real data was in use.
-  // Dropped to a gain that only lifts genuinely quiet passages up toward the ceiling,
-  // instead of pinning ordinary loud playback there too.
-  property real audioGain: 1.15
-  property real audioFloor: 0.15
-  readonly property real liveAudioLevel: (mediaService && mediaService.audioLevel) || 0
-  readonly property bool hasLiveAudioLevel: Boolean(mediaService && mediaService.hasLiveAudioLevel)
-  readonly property real targetEnergy: {
-    if (!isPlaying) return hasMedia ? 0.18 : 0.08
-    if (!hasLiveAudioLevel) return 1.0
-    return Math.max(audioFloor, Math.min(1.0, liveAudioLevel * audioGain))
+  readonly property var spectrum: mediaService && mediaService.spectrum ? mediaService.spectrum : []
+  readonly property real currentEnergy: mediaService ? mediaService.audioLevel : 0
+  property int positionTick: 0
+  readonly property real trackLength: activePlayer && activePlayer.lengthSupported ? Math.max(0, activePlayer.length) : 0
+  readonly property real trackPosition: {
+    var tick = positionTick
+    return activePlayer && activePlayer.positionSupported ? Math.max(0, Math.min(trackLength, activePlayer.position)) : 0
   }
-  property real currentEnergy: targetEnergy
+  readonly property bool hasTrackProgress: Boolean(activePlayer && activePlayer.positionSupported && trackLength > 0)
 
-  Behavior on currentEnergy {
-    NumberAnimation { duration: 160; easing.type: Easing.OutQuad }
+  function formatTime(seconds) {
+    var total = Math.max(0, Math.floor(seconds || 0))
+    var minutes = Math.floor(total / 60)
+    var remainder = total % 60
+    return minutes + ":" + (remainder < 10 ? "0" : "") + remainder
   }
+
+  Timer {
+    interval: 500
+    repeat: true
+    running: root.popupOpen && root.hasTrackProgress && Boolean(root.activePlayer && root.activePlayer.isPlaying)
+    onTriggered: root.positionTick++
+  }
+  onSpectrumChanged: { if (waveCanvas.visible) waveCanvas.requestPaint() }
+  onIsPlayingChanged: waveCanvas.requestPaint()
 
   readonly property bool hasMedia: activePlayer !== null && (Boolean(title) || Boolean(isPlaying) || Boolean(activePlayer.trackTitle || activePlayer.trackArtist))
   readonly property string playIcon: isPlaying ? "󰏤" : "󰐊"
@@ -164,12 +186,20 @@ BarWidget {
 
   property string verifiedArtUrl: ""
   readonly property string rawCandidateArtUrl: {
-    if (mediaService && mediaService.artUrl) return MediaModel.sanitizeArtUrl(mediaService.artUrl)
+    if (mediaService) return ""
     if (!activePlayer) return ""
     return MediaModel.extractArtUrl(activePlayer)
   }
 
-  readonly property string artUrl: verifiedArtUrl
+  readonly property string artUrl: {
+    var cached = mediaService ? String(mediaService.artUrl || "") : ""
+    // The service has validated raster bytes before writing this exact cache.
+    // Keep its timestamp query so Qt reloads the image when the track changes.
+    var expected = "file://" + artworkCachePath
+    if (cached === expected || (cached.indexOf(expected + "?t=") === 0 && /^\d+$/.test(cached.slice(expected.length + 3)))) return cached
+    if (MediaModel.isRasterDataUri(cached)) return cached
+    return verifiedArtUrl
+  }
   readonly property string artworkCachePath: (Quickshell.env("XDG_CACHE_HOME") || (Quickshell.env("HOME") + "/.cache")) + "/omarchy/music-flow/artwork.cache"
 
   onRawCandidateArtUrlChanged: {
@@ -191,7 +221,7 @@ BarWidget {
     artFetchProc.running = false
     artFetchProc.command = [
       "bash", "-c",
-      "set -euo pipefail; URL=\"$1\"; CACHE_FILE=\"$2\"; CACHE_DIR=\"$(dirname \"$CACHE_FILE\")\"; mkdir -p -m 0700 \"$CACHE_DIR\"; TMP_FILE=$(mktemp -p \"$CACHE_DIR\" artwork.XXXXXX); trap 'rm -f \"${TMP_FILE:-}\"' EXIT; if [[ \"$URL\" =~ ^https:// ]]; then HTTP_CODE=$(curl -sS --max-time 3 --max-filesize 2097152 --proto \"=https\" -w \"%{http_code}\" \"$URL\" -o \"$TMP_FILE\" 2>/dev/null || echo \"000\"); if [[ \"$HTTP_CODE\" != \"200\" ]]; then exit 1; fi; elif [[ \"$URL\" =~ ^file://(/.*) ]] || [[ \"$URL\" =~ ^(/.*) ]]; then FILE_PATH=\"${BASH_REMATCH[1]}\"; python3 -c '\nimport os,stat,sys\np=sys.argv[1]\nfd=os.open(p,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC)\nst=os.fstat(fd)\nif not(stat.S_ISREG(st.st_mode) and 4<=st.st_size<=2097152):\n os.close(fd)\n sys.exit(1)\nd=os.read(fd,2097152)\nos.close(fd)\nsys.stdout.buffer.write(d)\n' \"$FILE_PATH\" > \"$TMP_FILE\" 2>/dev/null; else exit 1; fi; MAGIC=$(od -N 12 -A n -t x1 \"$TMP_FILE\" 2>/dev/null | tr -d \" \\n\"); if [[ \"$MAGIC\" =~ ^89504e470d0a1a0a ]] || [[ \"$MAGIC\" =~ ^ffd8 ]] || [[ \"$MAGIC\" =~ ^47494638 ]] || [[ \"$MAGIC\" =~ ^424d ]] || [[ \"$MAGIC\" =~ ^52494646.{8}57454250 ]]; then mv -f \"$TMP_FILE\" \"$CACHE_FILE\"; exit 0; else exit 1; fi",
+      "set -euo pipefail; URL=\"$1\"; CACHE_FILE=\"$2\"; CACHE_DIR=\"$(dirname \"$CACHE_FILE\")\"; mkdir -p -m 0700 \"$CACHE_DIR\"; TMP_FILE=$(mktemp -p \"$CACHE_DIR\" artwork.XXXXXX); trap 'rm -f \"${TMP_FILE:-}\"' EXIT; if [[ \"$URL\" =~ ^https:// ]]; then HTTP_CODE=$(curl -sS --connect-timeout 3 --max-time 10 --retry 2 --retry-delay 1 --retry-max-time 25 --max-filesize 2097152 --proto \"=https\" -w \"%{http_code}\" \"$URL\" -o \"$TMP_FILE\" 2>/dev/null || echo \"000\"); if [[ \"$HTTP_CODE\" != \"200\" ]]; then exit 1; fi; elif [[ \"$URL\" =~ ^file://(/.*) ]] || [[ \"$URL\" =~ ^(/.*) ]]; then FILE_PATH=\"${BASH_REMATCH[1]}\"; python3 -c '\nimport os,stat,sys\nfrom urllib.parse import unquote, urlsplit\np=unquote(urlsplit(sys.argv[1]).path)\nfd=os.open(p,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC)\nst=os.fstat(fd)\nif not(stat.S_ISREG(st.st_mode) and 4<=st.st_size<=2097152):\n os.close(fd)\n sys.exit(1)\nd=os.read(fd,2097152)\nos.close(fd)\nsys.stdout.buffer.write(d)\n' \"$FILE_PATH\" > \"$TMP_FILE\" 2>/dev/null; else exit 1; fi; MAGIC=$(od -N 12 -A n -t x1 \"$TMP_FILE\" 2>/dev/null | tr -d \" \\n\"); if [[ \"$MAGIC\" =~ ^89504e470d0a1a0a ]] || [[ \"$MAGIC\" =~ ^ffd8 ]] || [[ \"$MAGIC\" =~ ^47494638 ]] || [[ \"$MAGIC\" =~ ^424d ]] || [[ \"$MAGIC\" =~ ^52494646.{8}57454250 ]]; then mv -f \"$TMP_FILE\" \"$CACHE_FILE\"; exit 0; else exit 1; fi",
       "--",
       raw,
       root.artworkCachePath
@@ -210,9 +240,13 @@ BarWidget {
     }
   }
 
+  PluginCommons.Translations { id: localStrings; directory: Qt.resolvedUrl("local-i18n") }
+  property bool settingsOpen: false
   property bool popupOpen: false
   property bool isMinimized: false
 
+  readonly property bool opened: popupOpen
+  function open() { popupOpen = true }
   function close() { popupOpen = false }
   property real maxLabelWidth: 220
 
@@ -268,7 +302,13 @@ BarWidget {
     return MediaModel.sourceIcon(player)
   }
 
-  visible: true
+  visible: Boolean(root.activePlayer && (root.isPlaying || root.activePlayer.playbackState === MprisPlaybackState.Paused))
+  onVisibleChanged: {
+    if (!visible) {
+      root.popupOpen = false
+      if (root.bar) root.bar.hideTooltip(root)
+    }
+  }
   implicitWidth: pill.width + Style.space(8)
   implicitHeight: barSize
 
@@ -283,8 +323,8 @@ BarWidget {
     height: Math.min(parent.height - Style.space(6), Style.space(28))
     width: root.isMinimized
       ? height
-      : (root.showText ? (flowRow.implicitWidth + Style.space(16)) : Style.space(110))
-    radius: height / 2
+      : (root.showText ? (flowRow.implicitWidth + Style.space(16)) : Math.max(Style.space(110), flowRow.implicitWidth + Style.space(16)))
+    radius: Style.cornerRadius
     clip: true
     color: clickArea.containsMouse ? Util.alpha(root.bar ? root.bar.barForeground : Color.foreground, 0.05) : "transparent"
     borderSpec: Border.none()
@@ -296,127 +336,76 @@ BarWidget {
       ColorAnimation { duration: 180 }
     }
 
-    // Dynamic Multi-Mode Continuous Audio Visualizer Canvas
+    // Subtle live audio animation behind the media content.
     Canvas {
       id: waveCanvas
       anchors.fill: parent
       anchors.margins: Style.space(2)
+      anchors.leftMargin: barThumbnail.visible
+        ? Style.space(8) + barThumbnail.width + Style.space(7)
+        : Style.space(2)
       visible: !root.isMinimized
-
-      property real phase: 0
-
-      // Phase speed scales with root.currentEnergy instead of running on a fixed
-      // wall-clock loop: previously phase advanced a full cycle every 2200ms
-      // regardless of what was playing, so only the wave's amplitude reacted to
-      // real audio - the motion itself always looked like the same repeating
-      // loop no matter how loud or quiet the track got (reported: "moving in a
-      // short loop", not in sync with the sound). Baseline rate matches the old
-      // fixed 2200ms/cycle; energy scales it from ~0.4x (quiet/idle ambient
-      // drift, motion never freezes abruptly) up to ~2x (loud) so a real beat
-      // drop visibly speeds the motion up, not just its amplitude.
-      FrameAnimation {
-        id: phaseDriver
-        running: true
-        readonly property real baseRate: (Math.PI * 2) / 2.2
-
-        onTriggered: {
-          if (frameTime <= 0 || frameTime > 1) return
-          var speed = baseRate * (0.4 + root.currentEnergy * 1.6)
-          var next = waveCanvas.phase + speed * frameTime
-          waveCanvas.phase = next >= Math.PI * 2 ? next - Math.PI * 2 : next
-        }
-      }
-
-      onPhaseChanged: requestPaint()
-
+      readonly property bool highContrast: !root.showBarThumbnail && !root.showAppLogo && !root.showText
+      opacity: highContrast ? 1.0 : 0.55
+      onHighContrastChanged: requestPaint()
+      onVisibleChanged: requestPaint()
+      onWidthChanged: requestPaint()
+      onHeightChanged: requestPaint()
       onPaint: {
         var ctx = getContext("2d")
         ctx.clearRect(0, 0, width, height)
-        if (width <= 0 || height <= 0) return
-
-        var midY = height / 2
-        var energy = root.currentEnergy
+        if (!visible || !root.isPlaying || root.spectrum.length !== 16 || width <= 0 || height <= 0) return
+        var bands = root.spectrum
+        var sumSquares = 0
+        for (var b = 0; b < bands.length; b++) sumSquares += bands[b] * bands[b]
+        var energy = Math.sqrt(sumSquares / bands.length)
+        if (energy <= 0.005) return
+        var mid = height / 2
         var mode = root.visualizerMode
-
-        // Multi-frequency rhythm & beat intensity physics
-        var bassPulse = Math.pow(Math.abs(Math.sin(phase * 2.5)), 3) * energy
-        var melodySwell = (0.5 + 0.5 * Math.sin(phase * 0.35)) * energy
-        var intensity = 0.2 + (bassPulse * 0.5 + melodySwell * 0.3) * energy
-
-        if (mode === "wave") {
-          // 1. DUAL HARMONIC REACTIVE OCEAN WAVE
-          var amp = height * (0.06 + energy * (0.22 + intensity * 0.15))
-
-          ctx.lineWidth = 1.2 + bassPulse * 0.8
-          ctx.strokeStyle = energy > 0.4 ? Color.accent : Util.alpha(Color.accent, 0.4)
+        ctx.strokeStyle = Util.alpha(Color.accent, 0.35 + energy * 0.65)
+        ctx.fillStyle = Util.alpha(Color.accent, 0.25 + energy * 0.75)
+        ctx.lineWidth = highContrast ? 2.5 : 1.5
+        if (mode === "ribbon") {
           ctx.beginPath()
-          for (var x = 0; x <= width; x += 3) {
-            var k = (x / width) * Math.PI * 4
-            var y = midY + Math.sin(k + phase * (0.8 + energy * 0.4)) * Math.cos(k * 0.5 + phase * 0.6) * amp
-            if (x === 0) ctx.moveTo(x, y)
-            else ctx.lineTo(x, y)
+          for (var top = 0; top < 16; top++) {
+            var ribbonX = top * width / 15
+            var ribbonY = mid - bands[top] * height * 0.44
+            if (top === 0) ctx.moveTo(ribbonX, ribbonY)
+            else ctx.lineTo(ribbonX, ribbonY)
           }
-          ctx.stroke()
-
-          if (energy > 0.25) {
-            ctx.lineWidth = 0.9
-            ctx.strokeStyle = root.bar ? root.bar.barForeground : Color.foreground
+          for (var bottom = 15; bottom >= 0; bottom--)
+            ctx.lineTo(bottom * width / 15, mid + bands[bottom] * height * 0.44)
+          ctx.closePath()
+          ctx.fill()
+        } else if (mode === "wave") {
+          for (var side = -1; side <= 1; side += 2) {
             ctx.beginPath()
-            for (var x2 = 0; x2 <= width; x2 += 3) {
-              var k2 = (x2 / width) * Math.PI * 3
-              var y2 = midY + Math.sin(k2 - phase * 1.2) * (amp * 0.65)
-              if (x2 === 0) ctx.moveTo(x2, y2)
-              else ctx.lineTo(x2, y2)
+            for (var i = 0; i < 16; i++) {
+              var x = i * width / 15
+              var y = mid + side * bands[i] * height * 0.44
+              if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y)
             }
             ctx.stroke()
           }
-        } else if (mode === "bars") {
-          // 2. ADAPTIVE FREQUENCY EQUALIZER BARS
-          var numBars = root.showText ? 16 : 22
-          var barW = (width / numBars) * 0.45
-          var gap = (width / numBars) * 0.55
-          ctx.fillStyle = energy > 0.4 ? Color.accent : Util.alpha(Color.accent, 0.4)
-          for (var b = 0; b < numBars; b++) {
-            var barFreq = Math.abs(Math.sin(phase * 2.0 + b * 0.75) * Math.cos(phase * 1.2 + b * 0.35))
-            var bh = (barFreq * (height * (0.15 + energy * (0.3 + intensity * 0.35))) + 2)
-            var bx = b * (barW + gap) + gap / 2
-            var by = midY - bh / 2
-            ctx.fillRect(bx, by, barW, bh)
+        } else {
+          var step = width / 16
+          for (var n = 0; n < 16; n++) {
+            var value = bands[n]
+            if (value <= 0.005) continue
+            ctx.fillStyle = Util.alpha(Color.accent, value)
+            var px = (n + 0.5) * step
+            var h = value * height * 0.9
+            if (mode === "equalizer") ctx.fillRect(px - step * 0.3, height - h, step * 0.6, h)
+            else if (mode === "bars") ctx.fillRect(px - step * 0.25, mid - h / 2, step * 0.5, h)
+            else if (mode === "dots") {
+              ctx.beginPath(); ctx.arc(px, mid, value * Math.min(step * 0.4, height * 0.4), 0, Math.PI * 2); ctx.fill()
+            } else if (mode === "particles") {
+              // Frequency energy places paired sparks; no random or timed motion.
+              for (var sign = -1; sign <= 1; sign += 2) {
+                ctx.beginPath(); ctx.arc(px, mid + sign * h / 2, value * 2, 0, Math.PI * 2); ctx.fill()
+              }
+            }
           }
-        } else if (mode === "dots") {
-          // 3. PULSING WAVE MATRIX BEADS
-          var numDots = root.showText ? 14 : 18
-          var step = width / (numDots + 1)
-          ctx.fillStyle = energy > 0.4 ? Color.accent : Util.alpha(Color.accent, 0.4)
-          for (var d = 1; d <= numDots; d++) {
-            var dx = d * step
-            var dotOsc = Math.sin(phase * 2.0 + d * 0.6)
-            var dy = midY + dotOsc * (height * (0.08 + energy * (0.18 + intensity * 0.16)))
-            var r = (1.5 + (bassPulse * 1.0) + (energy * 0.8))
-            ctx.beginPath()
-            ctx.arc(dx, dy, r, 0, Math.PI * 2)
-            ctx.fill()
-          }
-        } else if (mode === "particles") {
-          // 4. FLOWING SOUND DUST / SPARKS
-          var numParts = root.showText ? 12 : 16
-          for (var pIdx = 0; pIdx < numParts; pIdx++) {
-            var speed = 20 + energy * 20 + bassPulse * 10
-            var px = ((pIdx * 28 + (phase / (Math.PI * 2)) * width * (0.6 + energy * 0.6)) % width)
-            var py = midY + Math.sin(px * 0.08 + phase + pIdx) * (height * (0.08 + energy * (0.2 + intensity * 0.15)))
-            ctx.fillStyle = (pIdx % 2 === 0) ? (energy > 0.4 ? Color.accent : Util.alpha(Color.accent, 0.4)) : (root.bar ? root.bar.barForeground : Color.foreground)
-            ctx.beginPath()
-            ctx.arc(px, py, 1.4 + energy * 0.8 + bassPulse * 0.6, 0, Math.PI * 2)
-            ctx.fill()
-          }
-        } else if (mode === "pulse") {
-          // 5. RHYTHMIC BREATHING AUDIO HEARTBEAT
-          var pulseScale = 0.25 + energy * (0.35 + intensity * 0.4)
-          var grad = ctx.createRadialGradient(width / 2, midY, 2, width / 2, midY, (width / 2) * pulseScale)
-          grad.addColorStop(0, energy > 0.4 ? Color.accent : Util.alpha(Color.accent, 0.3))
-          grad.addColorStop(1, "transparent")
-          ctx.fillStyle = grad
-          ctx.fillRect(0, 0, width, height)
         }
       }
     }
@@ -438,35 +427,50 @@ BarWidget {
       }
     }
 
-    // Pure Minimalist Visualizer Mode (Source Glyph centered over flow)
-    Item {
-      anchors.fill: parent
-      visible: !root.isMinimized && !root.showText
-
-      Text {
-        anchors.centerIn: parent
-        text: root.hasMedia ? root.sourceIcon(root.activePlayer) : "󰝚"
-        textFormat: Text.PlainText
-        color: root.isPlaying ? Color.accent : (root.hasMedia ? (root.bar ? root.bar.barForeground : Color.foreground) : Qt.darker(root.bar ? root.bar.barForeground : Color.foreground, 1.4))
-        font.family: root.bar ? root.bar.fontFamily : Style.font.family
-        font.pixelSize: Style.font.body
-        font.bold: true
-        Behavior on color { ColorAnimation { duration: 140 } }
-      }
-    }
-
-    // Full Expanded Mode (Music icon + Scrolling song name over flow)
+    // Thumbnail, app logo, and track text each follow their own display toggle.
     Row {
       id: flowRow
-      anchors.centerIn: parent
+      anchors.verticalCenter: parent.verticalCenter
+      x: barThumbnail.visible ? Style.space(8) : (parent.width - width) / 2
       spacing: Style.space(7)
-      visible: !root.isMinimized && root.showText
+      visible: !root.isMinimized
+
+      Item {
+        id: barThumbnail
+        anchors.verticalCenter: parent.verticalCenter
+        width: Style.space(22)
+        height: width
+        visible: root.showBarThumbnail
+
+        Image {
+          id: barArtwork
+          anchors.fill: parent
+          source: root.artUrl
+          sourceSize.width: Style.space(44)
+          sourceSize.height: Style.space(44)
+          fillMode: Image.PreserveAspectCrop
+          asynchronous: true
+          autoTransform: true
+          visible: status === Image.Ready
+        }
+
+        Text {
+          anchors.centerIn: parent
+          visible: barArtwork.status !== Image.Ready
+          text: root.sourceIcon(root.activePlayer)
+          textFormat: Text.PlainText
+          color: Color.accent
+          font.family: root.bar ? root.bar.fontFamily : Style.font.family
+          font.pixelSize: Style.font.body
+        }
+      }
 
       // Music Icon / Source Glyph
       Text {
         id: glyph
+        visible: root.showAppLogo && (!root.showBarThumbnail || barArtwork.status === Image.Ready)
         anchors.verticalCenter: parent.verticalCenter
-        text: root.hasMedia ? root.sourceIcon(root.activePlayer) : "󰝚"
+        text: root.hasMedia && root.showAppLogo ? root.sourceIcon(root.activePlayer) : "󰝚"
         textFormat: Text.PlainText
         color: root.isPlaying ? Color.accent : (root.hasMedia ? (root.bar ? root.bar.barForeground : Color.foreground) : Qt.darker(root.bar ? root.bar.barForeground : Color.foreground, 1.4))
         font.family: root.bar ? root.bar.fontFamily : Style.font.family
@@ -486,7 +490,7 @@ BarWidget {
         height: Math.max(glyph.implicitHeight, Style.space(16))
         clip: true
         anchors.verticalCenter: parent.verticalCenter
-        visible: !root.bar || !root.bar.vertical
+        visible: root.showText && (!root.bar || !root.bar.vertical)
 
         Text {
           id: idleLabel
@@ -576,7 +580,7 @@ BarWidget {
       if (mouse.button === Qt.MiddleButton) {
         root.runAction("playPause", root.activePlayer)
       } else if (mouse.button === Qt.RightButton) {
-        root.showText = !root.showText
+        root.toggleTrackText()
       } else {
         root.popupOpen = !root.popupOpen
       }
@@ -616,11 +620,12 @@ BarWidget {
         BorderSurface {
           width: Style.space(72)
           height: Style.space(72)
-          radius: Style.spacing.labelGap
+          radius: Style.cornerRadius
           color: Util.alpha(root.bar ? root.bar.foreground : Color.foreground, 0.08)
           borderSpec: Border.controlSpec("normal", root.bar ? root.bar.foreground : Color.foreground, Color.accent)
 
           Image {
+            id: popupThumbnail
             anchors.fill: parent
             anchors.margins: Style.space(2)
             fillMode: Image.PreserveAspectCrop
@@ -629,12 +634,12 @@ BarWidget {
             sourceSize.width: Style.space(144)
             sourceSize.height: Style.space(144)
             source: root.artUrl
-            visible: source !== ""
+            visible: status === Image.Ready
           }
 
           Text {
             anchors.centerIn: parent
-            visible: root.artUrl === ""
+            visible: popupThumbnail.status !== Image.Ready
             text: root.hasMedia ? root.sourceIcon(root.activePlayer) : "󰝚"
             textFormat: Text.PlainText
             color: Color.accent
@@ -645,7 +650,7 @@ BarWidget {
 
         Column {
           spacing: Style.space(3)
-          width: parent.width - Style.space(84)
+          width: parent.width - Style.space(72) - settingsGear.width - parent.spacing * 2
           anchors.verticalCenter: parent.verticalCenter
 
           // Active Source Badge
@@ -703,6 +708,80 @@ BarWidget {
             visible: text !== ""
           }
         }
+        Button {
+          id: settingsGear
+          bordered: true
+          iconText: "󰒓"
+          tooltipText: localStrings.t("settings.title")
+          foreground: root.bar ? root.bar.foreground : Color.foreground
+          selected: root.settingsOpen
+          focusable: true
+          onClicked: root.settingsOpen = !root.settingsOpen
+        }
+      }
+
+      Column {
+        width: parent.width
+        spacing: Style.space(2)
+        visible: root.hasTrackProgress
+
+        PanelSlider {
+          id: progressSlider
+          width: parent.width
+          bar: root.bar
+          minimum: 0
+          maximum: Math.max(1, root.trackLength)
+          step: 5
+          value: root.trackPosition
+          enabled: Boolean(root.activePlayer && root.activePlayer.canSeek)
+          opacity: enabled ? 1 : 0.6
+          fillColor: Color.accent
+          knobColor: Color.accent
+          property var targetPlayer: null
+          property string targetTrack: ""
+          onDraggingChanged: {
+            if (dragging) {
+              targetPlayer = root.activePlayer
+              targetTrack = MediaModel.trackSignature(targetPlayer)
+            }
+          }
+          onMoved: function(value) {
+            if (!dragging) {
+              targetPlayer = root.activePlayer
+              targetTrack = MediaModel.trackSignature(targetPlayer)
+            }
+          }
+          onReleased: function(value) {
+            if (targetPlayer && targetPlayer === root.activePlayer
+                && targetTrack === MediaModel.trackSignature(targetPlayer)
+                && targetPlayer.canSeek && targetPlayer.positionSupported) {
+              targetPlayer.position = Math.max(0, Math.min(root.trackLength, value))
+              root.positionTick++
+            }
+            targetPlayer = null
+          }
+        }
+
+        Row {
+          width: parent.width
+          Text {
+            width: parent.width / 2
+            text: root.formatTime(progressSlider.dragging ? progressSlider.liveValue : root.trackPosition)
+            textFormat: Text.PlainText
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.caption
+            color: Util.alpha(root.bar ? root.bar.foreground : Color.foreground, 0.65)
+          }
+          Text {
+            width: parent.width / 2
+            horizontalAlignment: Text.AlignRight
+            text: root.formatTime(root.trackLength)
+            textFormat: Text.PlainText
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.caption
+            color: Util.alpha(root.bar ? root.bar.foreground : Color.foreground, 0.65)
+          }
+        }
       }
 
       // Playback Controls
@@ -712,6 +791,8 @@ BarWidget {
 
         Button {
           iconText: "󰒮"
+          width: Style.space(40)
+          height: Style.space(40)
           foreground: root.bar ? root.bar.foreground : Color.foreground
           horizontalPadding: Style.spacing.controlPaddingX
           verticalPadding: Style.spacing.controlPaddingY
@@ -722,8 +803,10 @@ BarWidget {
 
         Button {
           iconText: root.isPlaying ? "󰏤" : "󰐊"
+          width: Style.space(40)
+          height: Style.space(40)
           foreground: Color.accent
-          horizontalPadding: Style.spacing.panelGap
+          horizontalPadding: Style.spacing.controlPaddingX
           verticalPadding: Style.spacing.controlPaddingY
           iconSize: Style.font.iconLarge
           enabled: Boolean(root.activePlayer && (root.activePlayer.canTogglePlaying || root.activePlayer.canPlay || root.activePlayer.canPause || root.isPlaying))
@@ -733,6 +816,8 @@ BarWidget {
 
         Button {
           iconText: "󰒭"
+          width: Style.space(40)
+          height: Style.space(40)
           foreground: root.bar ? root.bar.foreground : Color.foreground
           horizontalPadding: Style.spacing.controlPaddingX
           verticalPadding: Style.spacing.controlPaddingY
@@ -784,143 +869,117 @@ BarWidget {
         }
       }
 
-      // Visualizer Flow & Text Visibility Switcher
       Column {
+        visible: root.settingsOpen
         width: parent.width
-        spacing: Style.space(6)
+        spacing: Style.space(10)
 
-        // Flow instead of Row: the exact pixel width available here depends on
-        // theme spacing overrides, font metrics, and popup width clamping that
-        // can't be predicted from fixed numbers alone (a hardcoded width already
-        // overflowed the popup's edge once at this row's natural content width).
-        // Flow wraps the toggle pill onto its own line if it doesn't fit,
-        // instead of letting it render past the popup's edge - the popup's
-        // height already sizes to column.implicitHeight, so a wrap just makes
-        // the popup a bit taller instead of visually overflowing sideways.
-        Flow {
+        PanelSeparator { foreground: root.bar ? root.bar.foreground : Color.foreground }
+
+        Text {
+          text: localStrings.t("settings.animation")
+          textFormat: Text.PlainText
+          color: root.bar ? root.bar.foreground : Color.foreground
+          font.family: root.bar ? root.bar.fontFamily : Style.font.family
+          font.pixelSize: Style.font.bodySmall
+          font.bold: true
+        }
+
+        GridLayout {
           width: parent.width
-          spacing: Style.space(6)
+          columns: 2
+          columnSpacing: Style.space(6)
+          rowSpacing: Style.space(6)
+          Repeater {
+            model: [
+              { id: "wave", key: "wave" },
+              { id: "bars", key: "bars" },
+              { id: "dots", key: "dots" },
+              { id: "particles", key: "sparks" },
+              { id: "equalizer", key: "equalizer" },
+              { id: "ribbon", key: "ribbon" }
+            ]
+            Button {
+              required property var modelData
+              required property int index
+              Layout.fillWidth: true
+              Layout.preferredWidth: 1
+              Layout.columnSpan: 1
+              Layout.preferredHeight: Style.space(36)
+              text: localStrings.t("animation." + modelData.key)
+              fontSize: Style.font.bodySmall
+              foreground: root.bar ? root.bar.foreground : Color.foreground
+              selected: root.visualizerMode === modelData.id
+              bordered: true
+              focusable: true
 
-          Row {
-            spacing: Style.space(4)
-            Repeater {
-              model: [
-                { id: "wave", name: "Wave", icon: "󰎆" },
-                { id: "bars", name: "Bars", icon: "󰝛" },
-                { id: "dots", name: "Dots", icon: "󰄰" },
-                { id: "particles", name: "Sparks", icon: "󰠱" },
-                { id: "pulse", name: "Pulse", icon: "󰓎" }
-              ]
-
-              BorderSurface {
-                id: flowBtn
-                required property var modelData
-                readonly property bool isSelected: root.visualizerMode === modelData.id
-                // Repeater delegates can be created while the mouse cursor already sits over
-                // their pre-layout position, which seeds MouseArea.containsMouse to true before
-                // any real enter event fires. Track hover via onEntered/onExited instead so idle
-                // buttons never start out looking hovered.
-                property bool hovered: false
-
-                // Sized from the label's own implicit width instead of a fixed guess:
-                // a hardcoded width can't account for font metrics/theme scale, and a
-                // fixed-width sibling of this same row already overflowed once from
-                // exactly that kind of guess (see the toggle pill below).
-                width: flowBtnLabel.implicitWidth + Style.space(16)
-                height: Style.space(24)
-                radius: Style.spacing.labelGap
-                color: isSelected
-                  ? Style.selectedFillFor(root.bar ? root.bar.foreground : Color.foreground, Color.accent)
-                  : (flowBtn.hovered ? Style.hoverFillFor(root.bar ? root.bar.foreground : Color.foreground, Color.accent) : Util.alpha(root.bar ? root.bar.foreground : Color.foreground, 0.04))
-                borderSpec: isSelected
-                  ? Border.controlSpec("normal", root.bar ? root.bar.foreground : Color.foreground, Color.accent)
-                  : Border.none()
-
-                Row {
-                  id: flowBtnLabel
-                  anchors.centerIn: parent
-                  spacing: Style.space(2)
-                  Text {
-                    text: flowBtn.modelData.icon
-                    textFormat: Text.PlainText
-                    color: flowBtn.isSelected ? Color.accent : (root.bar ? root.bar.foreground : Color.foreground)
-                    font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                    font.pixelSize: Style.font.caption
-                    anchors.verticalCenter: parent.verticalCenter
-                  }
-                  Text {
-                    text: flowBtn.modelData.name
-                    textFormat: Text.PlainText
-                    color: flowBtn.isSelected ? Color.accent : (root.bar ? root.bar.foreground : Color.foreground)
-                    font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                    font.pixelSize: Style.font.caption
-                    font.bold: flowBtn.isSelected
-                    anchors.verticalCenter: parent.verticalCenter
-                  }
-                }
-
-                MouseArea {
-                  id: flowMouse
-                  anchors.fill: parent
-                  hoverEnabled: true
-                  cursorShape: Qt.PointingHandCursor
-                  onEntered: flowBtn.hovered = true
-                  onExited: flowBtn.hovered = false
-                  onClicked: {
-                    root.visualizerMode = flowBtn.modelData.id
-                    waveCanvas.requestPaint()
-                  }
-                }
+              onClicked: {
+                root.selectAnimation(modelData.id)
               }
             }
           }
+        }
 
-          // Text / Pure Flow Toggle Pill
-          BorderSurface {
-            id: textToggleBtn
-            // Sized from the label's own implicit width instead of a fixed guess -
-            // a hardcoded width here is exactly what overflowed the popup's edge.
-            width: toggleLabel.implicitWidth + Style.space(16)
-            height: Style.space(24)
-            radius: Style.spacing.labelGap
-            color: root.showText
-              ? Style.selectedFillFor(root.bar ? root.bar.foreground : Color.foreground, Color.accent)
-              : (textToggleMouse.containsMouse ? Style.hoverFillFor(root.bar ? root.bar.foreground : Color.foreground, Color.accent) : Util.alpha(root.bar ? root.bar.foreground : Color.foreground, 0.04))
-            borderSpec: root.showText
-              ? Border.controlSpec("normal", root.bar ? root.bar.foreground : Color.foreground, Color.accent)
-              : Border.none()
+        Text {
+          text: localStrings.t("settings.display")
+          textFormat: Text.PlainText
+          color: root.bar ? root.bar.foreground : Color.foreground
+          font.family: root.bar ? root.bar.fontFamily : Style.font.family
+          font.pixelSize: Style.font.bodySmall
+          font.bold: true
+        }
 
-            Row {
-              id: toggleLabel
-              anchors.centerIn: parent
-              spacing: Style.space(3)
-              Text {
-                text: root.showText ? "󰈈" : "󰈉"
-                textFormat: Text.PlainText
-                color: root.showText ? Color.accent : (root.bar ? root.bar.foreground : Color.foreground)
-                font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                font.pixelSize: Style.font.caption
-                anchors.verticalCenter: parent.verticalCenter
-              }
-              Text {
-                text: root.showText ? "Words ON" : "Pure Flow"
-                textFormat: Text.PlainText
-                color: root.showText ? Color.accent : (root.bar ? root.bar.foreground : Color.foreground)
-                font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                font.pixelSize: Style.font.caption
-                font.bold: root.showText
-                anchors.verticalCenter: parent.verticalCenter
-              }
-            }
-
-            MouseArea {
-              id: textToggleMouse
-              anchors.fill: parent
-              hoverEnabled: true
-              cursorShape: Qt.PointingHandCursor
-              onClicked: root.showText = !root.showText
-            }
+        Button {
+          width: parent.width
+          height: Style.space(38)
+          leftAlign: true
+          text: localStrings.t("settings.thumbnail")
+          iconText: root.showBarThumbnail ? "󰄬" : "󰄱"
+          fontSize: Style.font.bodySmall
+          selected: root.showBarThumbnail
+          bordered: true
+          foreground: root.bar ? root.bar.foreground : Color.foreground
+          focusable: true
+          enabled: !thumbnailPreference.running
+          onClicked: {
+            root.showBarThumbnail = !root.showBarThumbnail
+            thumbnailPreference.command = ["omarchy", "bar", "set", "custom.media", "showBarThumbnail", root.showBarThumbnail ? "true" : "false", "--json"]
+            thumbnailPreference.running = true
           }
+        }
+
+        Button {
+          width: parent.width
+          height: Style.space(38)
+          leftAlign: true
+          text: localStrings.t("settings.appLogo")
+          iconText: root.showAppLogo ? "󰄬" : "󰄱"
+          fontSize: Style.font.bodySmall
+          selected: root.showAppLogo
+          bordered: true
+          foreground: root.bar ? root.bar.foreground : Color.foreground
+          focusable: true
+          enabled: !appLogoPreference.running
+          onClicked: {
+            root.showAppLogo = !root.showAppLogo
+            appLogoPreference.command = ["omarchy", "bar", "set", "custom.media", "showAppLogo", root.showAppLogo ? "true" : "false", "--json"]
+            appLogoPreference.running = true
+          }
+        }
+
+        Button {
+          width: parent.width
+          height: Style.space(38)
+          leftAlign: true
+          text: localStrings.t("settings.words")
+          iconText: root.showText ? "󰄬" : "󰄱"
+          fontSize: Style.font.bodySmall
+          selected: root.showText
+          bordered: true
+          foreground: root.bar ? root.bar.foreground : Color.foreground
+          focusable: true
+          enabled: !textPreference.running
+          onClicked: root.toggleTrackText()
         }
       }
 
@@ -945,20 +1004,29 @@ BarWidget {
           }
 
           Text {
-            text: "SELECT PLAYER / SOURCE"
+            text: localStrings.t("players.title")
             textFormat: Text.PlainText
-            color: Qt.darker(root.bar ? root.bar.foreground : Color.foreground, 1.4)
+            color: root.bar ? root.bar.foreground : Color.foreground
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            font.pixelSize: Style.font.caption
+            font.pixelSize: Style.font.bodySmall
             font.bold: true
             anchors.verticalCenter: parent.verticalCenter
           }
         }
 
+        Text {
+          visible: root.sourcePlayers.length > 1
+          text: localStrings.t("players.hint")
+          textFormat: Text.PlainText
+          color: Util.alpha(root.bar ? root.bar.foreground : Color.foreground, 0.6)
+          font.family: root.bar ? root.bar.fontFamily : Style.font.family
+          font.pixelSize: Style.font.caption
+        }
+
         // Empty state when no players are active
         Text {
           visible: root.sourcePlayers.length === 0
-          text: "No active media players found."
+          text: localStrings.t("players.empty")
           textFormat: Text.PlainText
           color: Qt.darker(root.bar ? root.bar.foreground : Color.foreground, 1.6)
           font.family: root.bar ? root.bar.fontFamily : Style.font.family
@@ -998,24 +1066,26 @@ BarWidget {
             property bool hovered: false
 
             width: parent.width
-            height: Style.space(42)
-            radius: Style.spacing.labelGap
+            height: Style.space(54)
+            radius: Style.cornerRadius
             color: selected
               ? Style.selectedFillFor(root.bar ? root.bar.foreground : Color.foreground, Color.accent)
               : (sourceRow.hovered ? Style.hoverFillFor(root.bar ? root.bar.foreground : Color.foreground, Color.accent) : Util.alpha(root.bar ? root.bar.foreground : Color.foreground, 0.04))
             borderSpec: selected
-              ? Border.controlSpec("normal", root.bar ? root.bar.foreground : Color.foreground, Color.accent)
-              : (sourceRow.hovered ? Border.controlSpec("hover-cursor", root.bar ? root.bar.foreground : Color.foreground, Color.accent) : Border.none())
+              ? Border.controlSpec("selected", root.bar ? root.bar.foreground : Color.foreground, Color.accent)
+              : Border.controlSpec(sourceRow.hovered ? "hover-cursor" : "normal", root.bar ? root.bar.foreground : Color.foreground, Color.accent)
 
             Row {
               anchors.left: parent.left
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
+              z: 1
               anchors.leftMargin: Style.space(10)
               anchors.rightMargin: Style.space(10)
               spacing: Style.space(10)
 
               Text {
+                id: sourceGlyph
                 text: sourceRow.icon
                 textFormat: Text.PlainText
                 color: sourceRow.selected ? Color.accent : (root.bar ? root.bar.foreground : Color.foreground)
@@ -1025,45 +1095,86 @@ BarWidget {
               }
 
               Column {
-                width: parent.width - Style.space(60)
-                spacing: Style.space(1)
+                width: parent.width - sourceStatus.width - parent.spacing - (sourceGlyph.visible ? sourceGlyph.width + parent.spacing : 0)
+                spacing: Style.space(4)
                 anchors.verticalCenter: parent.verticalCenter
 
                 Text {
                   text: sourceRow.name
                   textFormat: Text.PlainText
-                  color: root.bar ? root.bar.foreground : Color.foreground
+                  color: sourceRow.selected ? Color.accent : (root.bar ? root.bar.foreground : Color.foreground)
                   font.family: root.bar ? root.bar.fontFamily : Style.font.family
                   font.pixelSize: Style.font.bodySmall
-                  font.bold: sourceRow.selected
+                  font.bold: true
                   elide: Text.ElideRight
                   width: parent.width
                 }
 
-                Text {
-                  text: sourceRow.track + (sourceRow.artistName && sourceRow.artistName !== sourceRow.name ? " — " + sourceRow.artistName : "")
-                  textFormat: Text.PlainText
-                  color: sourceRow.selected ? (root.bar ? root.bar.foreground : Color.foreground) : Qt.darker(root.bar ? root.bar.foreground : Color.foreground, 1.5)
-                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                  font.pixelSize: Style.font.caption
-                  elide: Text.ElideRight
+                Item {
+                  id: sourceTrackClip
                   width: parent.width
+                  height: sourceTrack.implicitHeight
+                  clip: true
+                  readonly property real overflow: Math.max(0, sourceTrack.implicitWidth - width)
+
+                  Text {
+                    id: sourceTrack
+                    text: sourceRow.track + (sourceRow.artistName && sourceRow.artistName !== sourceRow.name ? " — " + sourceRow.artistName : "")
+                    textFormat: Text.PlainText
+                    color: Util.alpha(root.bar ? root.bar.foreground : Color.foreground, 0.65)
+                    font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                    font.pixelSize: Style.font.caption
+                    onTextChanged: {
+                      x = 0
+                      if (sourceTrackScroll.running) sourceTrackScroll.restart()
+                    }
+                  }
+
+                  SequentialAnimation {
+                    id: sourceTrackScroll
+                    running: root.popupOpen && (sourceRow.hovered || sourceStatus.hot) && sourceTrackClip.overflow > 0 && !Style.reduceMotion
+                    loops: Animation.Infinite
+                    onStopped: sourceTrack.x = 0
+                    PauseAnimation { duration: 1800 }
+                    NumberAnimation {
+                      target: sourceTrack
+                      property: "x"
+                      from: 0
+                      to: -sourceTrackClip.overflow
+                      duration: Math.max(1800, sourceTrackClip.overflow * 35)
+                      easing.type: Easing.Linear
+                    }
+                    PauseAnimation { duration: 1800 }
+                    NumberAnimation {
+                      target: sourceTrack
+                      property: "x"
+                      from: -sourceTrackClip.overflow
+                      to: 0
+                      duration: Math.max(1800, sourceTrackClip.overflow * 35)
+                      easing.type: Easing.Linear
+                    }
+                  }
                 }
               }
 
-              Text {
-                text: (sourceRow.player && sourceRow.player.isPlaying) ? "󰏤" : "󰐊"
-                textFormat: Text.PlainText
-                color: sourceRow.selected ? Color.accent : Qt.darker(root.bar ? root.bar.foreground : Color.foreground, 1.6)
-                font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                font.pixelSize: Style.font.bodySmall
+              Button {
+                id: sourceStatus
+                readonly property bool playing: Boolean(sourceRow.player && sourceRow.player.isPlaying)
+                iconText: playing ? "󰏤" : "󰐊"
+                tooltipText: localStrings.t(playing ? "players.pause" : "players.play")
+                foreground: sourceRow.selected ? Color.accent : (root.bar ? root.bar.foreground : Color.foreground)
+                enabled: MediaModel.canHandleAction(sourceRow.player, playing ? "pause" : "play")
+                opacity: enabled ? 1.0 : 0.4
+                focusable: true
                 anchors.verticalCenter: parent.verticalCenter
+                onClicked: root.runAction(playing ? "pause" : "play", sourceRow.player)
               }
             }
 
             MouseArea {
               id: sourceCardMouse
               anchors.fill: parent
+              anchors.rightMargin: sourceStatus.width + Style.space(10)
               hoverEnabled: true
               cursorShape: Qt.PointingHandCursor
               onEntered: sourceRow.hovered = true

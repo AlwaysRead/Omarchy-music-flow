@@ -1,0 +1,23 @@
+{
+  "player.title": "Music Flow",
+  "settings.title": "Settings",
+  "settings.thumbnail": "Show thumbnail in bar",
+  "settings.animation": "Animation",
+  "settings.display": "Display",
+  "settings.words": "Show track and artist",
+  "animation.wave": "Wave",
+  "animation.bars": "Mirror bars",
+  "animation.dots": "Dots",
+  "animation.sparks": "Sparks",
+  "animation.equalizer": "Equalizer",
+  "animation.ribbon": "Filled wave",
+  "settings.appLogo": "Show app logo in bar",
+  "players.title": "Media players",
+  "players.hint": "Choose a player to control",
+  "players.empty": "Play something to see it here",
+  "players.current": "Current",
+  "players.playing": "Playing",
+  "players.paused": "Paused",
+  "players.play": "Play",
+  "players.pause": "Pause"
+}

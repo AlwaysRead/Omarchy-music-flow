@@ -4,6 +4,7 @@ import Quickshell.Io
 import Quickshell.Services.Mpris
 import Quickshell.Services.Pipewire
 import "MediaModel.js" as MediaModel
+import "AudioSpectrum.js" as AudioSpectrum
 
 Item {
   id: root
@@ -54,160 +55,42 @@ Item {
     return true
   }
 
-  // Live audio level for the active player, so the bar visualizer's amplitude
-  // tracks real loudness instead of a synthetic pulse. Deliberately NOT the same
-  // single correlated node volume control uses (activePlayerStream/findPlayerStream
-  // just take the first match): a player like a browser can have several
-  // simultaneous PipeWire streams (multiple tabs/windows playing audio at once),
-  // all reporting as the same generic app name with no per-tab property to
-  // distinguish them, so the first match isn't necessarily the one actually
-  // producing sound. Reproduced live: audioLevel stayed exactly 0 across 10
-  // samples over 3s while a video was audibly playing, because 5 simultaneous
-  // Chromium streams existed and the monitored one wasn't the loud one. Monitor
-  // every matching stream and take the loudest instead.
-  readonly property var audioCandidateStreams: activePlayer ? MediaModel.matchingActiveStreams(activePlayer, playbackStreams) : []
-
-  Instantiator {
-    id: audioCandidateMonitors
-    model: root.audioCandidateStreams
-    delegate: PwNodePeakMonitor {
-      required property var modelData
-      node: modelData
-      enabled: true
-    }
-  }
-
-  readonly property real builtinAudioLevel: {
-    var maxPeak = 0
-    for (var i = 0; i < audioCandidateMonitors.count; i++) {
-      var obj = audioCandidateMonitors.objectAt(i)
-      if (obj) maxPeak = Math.max(maxPeak, obj.peak)
-    }
-    return Math.max(0, Math.min(1, maxPeak))
-  }
-
-  readonly property real audioLevel: fallbackPeakActive ? fallbackPeakLevel : builtinAudioLevel
-
-  // Quickshell's PwNodePeakMonitor can itself fail to report real peak data for a
-  // given stream regardless of anything this plugin does - confirmed on Quickshell
-  // 0.3.1 with a Spotify stream (44.1kHz, vs. a working 48kHz Chromium stream):
-  // peak read a flat 0 in an isolated test with zero involvement from this
-  // plugin's own matching/Instantiator code, while an independent `pw-record`
-  // capture of the same node proved genuinely non-silent audio was flowing. Track
-  // how long audioLevel has stayed at (near-)zero while a player is confirmed
-  // playing and a candidate stream was found; after a few seconds treat the peak
-  // data as unreliable so BarWidget falls back to its no-live-data ambient
-  // behavior instead of sitting at a flat, visually-dead floor value.
-  property real audioLevelZeroStreak: 0
-  property string audioLevelZeroTrackedKey: ""
-
-  Timer {
-    interval: 250
-    running: true
-    repeat: true
-    onTriggered: {
-      var key = root.activePlayer ? playerCanonicalKey(root.activePlayer) : ""
-      if (key !== root.audioLevelZeroTrackedKey) {
-        root.audioLevelZeroTrackedKey = key
-        root.audioLevelZeroStreak = 0
-        return
-      }
-      // Deliberately checks builtinAudioLevel, not audioLevel: once the fallback
-      // meter (below) is active, audioLevel reflects ITS reading, which would
-      // read as "reliable again" and immediately stop the fallback, which would
-      // make audioLevel broken again, restarting it - an infinite start/stop
-      // cycle. Reliability is strictly about whether the built-in monitor
-      // itself ever produces a real reading, independent of the fallback.
-      if (!root.isPlaying || audioCandidateMonitors.count === 0 || root.builtinAudioLevel > 0.01) {
-        root.audioLevelZeroStreak = 0
-      } else {
-        root.audioLevelZeroStreak += interval / 1000
-      }
-    }
-  }
-
-  readonly property bool audioLevelUnreliable: audioLevelZeroStreak >= 3.0
-  readonly property bool hasLiveAudioLevel: audioCandidateMonitors.count > 0 && (!audioLevelUnreliable || fallbackPeakActive)
-
-  // Fallback peak meter for streams the built-in PwNodePeakMonitor can't read
-  // (see audioLevelUnreliable above). Since a direct `pw-record` capture of the
-  // same node independently proved real, non-silent audio was available, drive
-  // the visualizer from that instead of settling for a non-reactive placeholder.
-  // Runs pw-record piped through a small python3 peak calculator only while
-  // confirmed needed (audioLevelUnreliable), so normal working streams never pay
-  // for an extra process. The node id is validated as a plain non-negative
-  // integer both before constructing the command and again inside the script,
-  // and passed as a positional arg after "--" (never interpolated into the
-  // script text) - the same pattern the artwork-fetch process above uses for
-  // untrusted-ish values.
-  readonly property var fallbackPeakTargetNode: audioCandidateStreams.length > 0 ? audioCandidateStreams[0] : null
-  property real fallbackPeakLevel: 0
-  property bool fallbackPeakActive: false
-
-  function stopFallbackPeakMeter() {
-    fallbackPeakProc.running = false
-    root.fallbackPeakActive = false
-    root.fallbackPeakLevel = 0
-  }
-
-  function startFallbackPeakMeter() {
-    var node = root.fallbackPeakTargetNode
-    if (!node) return
-    var nodeId = Number(node.id)
-    if (!Number.isInteger(nodeId) || nodeId < 0) return
-
-    fallbackPeakProc.running = false
-    root.fallbackPeakActive = false
-    root.fallbackPeakLevel = 0
-    // "set -m" gives the backgrounded pipeline its own process group, so a single
-    // signal to the negative PID (-$JOB_PID) reaches both pw-record and python3.
-    // Necessary: Quickshell's Process only signals its direct child (this bash
-    // instance) when stopped, and a plain `cmd1 | cmd2 &` job doesn't otherwise
-    // get its own child processes cleaned up just because the parent script
-    // exits - verified live (a standalone test without this left pw-record and
-    // python3 running as orphans after the parent bash was killed). Also
-    // verified: running python3 as a background job (not a blocking foreground
-    // command) is required for the trap to fire promptly on SIGTERM at all -
-    // a foreground `python3 ... <&coproc_fd` blocks bash's signal handling
-    // until python3 itself exits, which only happens once pw-record dies,
-    // which only happens once the trap runs - a deadlock with the earlier
-    // foreground-python3 design.
-    fallbackPeakProc.command = [
-      "bash", "-c",
-      "set -uo pipefail; NODE_ID=\"$1\"; if ! [[ \"$NODE_ID\" =~ ^[0-9]+$ ]]; then exit 1; fi; set -m; pw-record --target=\"$NODE_ID\" -P '{ format=s16 rate=44100 channels=2 }' - 2>/dev/null | python3 -u -c '\nimport struct, sys\nwhile True:\n    data = sys.stdin.buffer.read(4096)\n    if not data:\n        break\n    n = len(data) // 2\n    if n == 0:\n        continue\n    samples = struct.unpack(\"<\" + str(n) + \"h\", data[:n * 2])\n    peak = max(abs(s) for s in samples) / 32768.0\n    print(\"%.4f\" % peak, flush=True)\n' & JOB_PID=$!; trap 'kill -TERM -- \"-$JOB_PID\" 2>/dev/null' EXIT TERM INT; wait \"$JOB_PID\"",
-      "--",
-      String(nodeId)
-    ]
-    fallbackPeakProc.running = true
-  }
-
-  function refreshFallbackPeakMeter() {
-    if (root.audioLevelUnreliable && root.fallbackPeakTargetNode) {
-      startFallbackPeakMeter()
-    } else {
-      stopFallbackPeakMeter()
-    }
-  }
-
-  onAudioLevelUnreliableChanged: refreshFallbackPeakMeter()
-  onFallbackPeakTargetNodeChanged: refreshFallbackPeakMeter()
+  property var spectrum: []
+  property real spectrumEnergy: 0
+  property bool spectrumReady: false
+  readonly property real audioLevel: spectrumEnergy
 
   Process {
-    id: fallbackPeakProc
+    id: spectrumProcess
+    command: ["cava", "-p", Qt.resolvedUrl("config/visualizer.conf").toString().replace(/^file:\/\//, "")]
+    running: root.isPlaying
     stdout: SplitParser {
       splitMarker: "\n"
-      onRead: function(data) {
-        var v = parseFloat(data)
-        if (isFinite(v)) {
-          root.fallbackPeakActive = true
-          root.fallbackPeakLevel = Math.max(0, Math.min(1, v))
+      onRead: function(line) {
+        var parts = line.trim().split(";").filter(function(v) { return v !== "" })
+        if (parts.length !== 16) return
+        var bands = []
+        for (var i = 0; i < parts.length; i++) {
+          if (!/^\d{1,3}$/.test(parts[i])) return
+          var value = Number(parts[i])
+          if (value > 100) return
+          bands.push(value / 100)
         }
+        bands = AudioSpectrum.smooth(root.spectrum, bands)
+        var sum = 0
+        for (var b = 0; b < bands.length; b++) sum += bands[b] * bands[b]
+        root.spectrumEnergy = Math.sqrt(sum / 16)
+        root.spectrum = bands
+        root.spectrumReady = true
+        spectrumTimeout.restart()
       }
     }
-    onExited: {
-      root.fallbackPeakActive = false
-      root.fallbackPeakLevel = 0
-    }
+    onExited: { root.spectrum = []; root.spectrumEnergy = 0; root.spectrumReady = false }
+  }
+  Timer {
+    id: spectrumTimeout
+    interval: 500
+    onTriggered: { root.spectrum = []; root.spectrumEnergy = 0; root.spectrumReady = false }
   }
 
   readonly property var sourcePlayers: orderedSourcePlayers()
@@ -231,6 +114,13 @@ Item {
   // PlaybackStatus is stale (see isPlayerActive above).
   readonly property bool isPlaying: isPlayerActive(activePlayer)
 
+  onActivePlayerChanged: Qt.callLater(function() {
+    var key = root.playerCanonicalKey(root.activePlayer)
+    if (key) root.lastActivePlayerKey = key
+    if (root.preferredPlayerKey && key !== root.preferredPlayerKey && root.isPlaying)
+      root.preferredPlayerKey = ""
+  })
+
   // Per-player signal connections — use Mpris.players (UntypedObjectModel) directly
   // as the Instantiator model so Qt creates one Connections delegate per player.
   // Wire all relevant MprisPlayer notify signals so any change in state, track, or
@@ -241,11 +131,11 @@ Item {
       required property var modelData
       target: modelData
       function onIsPlayingChanged() {
-        root.syncPlayingOrder()
+        Qt.callLater(root.syncPlayingOrder)
         root.playbackVersion++
       }
       function onPlaybackStateChanged() {
-        root.syncPlayingOrder()
+        Qt.callLater(root.syncPlayingOrder)
         root.playbackVersion++
       }
       function onMetadataChanged() {
@@ -308,7 +198,7 @@ Item {
     artFetchProc.running = false
     artFetchProc.command = [
       "bash", "-c",
-      "set -euo pipefail; URL=\"$1\"; CACHE_FILE=\"$2\"; CACHE_DIR=\"$(dirname \"$CACHE_FILE\")\"; mkdir -p -m 0700 \"$CACHE_DIR\"; TMP_FILE=$(mktemp -p \"$CACHE_DIR\" artwork.XXXXXX); trap 'rm -f \"${TMP_FILE:-}\"' EXIT; if [[ \"$URL\" =~ ^https:// ]]; then HTTP_CODE=$(curl -sS --max-time 3 --max-filesize 2097152 --proto \"=https\" -w \"%{http_code}\" \"$URL\" -o \"$TMP_FILE\" 2>/dev/null || echo \"000\"); if [[ \"$HTTP_CODE\" != \"200\" ]]; then exit 1; fi; elif [[ \"$URL\" =~ ^file://(/.*) ]] || [[ \"$URL\" =~ ^(/.*) ]]; then FILE_PATH=\"${BASH_REMATCH[1]}\"; python3 -c '\nimport os,stat,sys\np=sys.argv[1]\nfd=os.open(p,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC)\nst=os.fstat(fd)\nif not(stat.S_ISREG(st.st_mode) and 4<=st.st_size<=2097152):\n os.close(fd)\n sys.exit(1)\nd=os.read(fd,2097152)\nos.close(fd)\nsys.stdout.buffer.write(d)\n' \"$FILE_PATH\" > \"$TMP_FILE\" 2>/dev/null; else exit 1; fi; MAGIC=$(od -N 12 -A n -t x1 \"$TMP_FILE\" 2>/dev/null | tr -d \" \\n\"); if [[ \"$MAGIC\" =~ ^89504e470d0a1a0a ]] || [[ \"$MAGIC\" =~ ^ffd8 ]] || [[ \"$MAGIC\" =~ ^47494638 ]] || [[ \"$MAGIC\" =~ ^424d ]] || [[ \"$MAGIC\" =~ ^52494646.{8}57454250 ]]; then mv -f \"$TMP_FILE\" \"$CACHE_FILE\"; exit 0; else exit 1; fi",
+      "set -euo pipefail; URL=\"$1\"; CACHE_FILE=\"$2\"; CACHE_DIR=\"$(dirname \"$CACHE_FILE\")\"; mkdir -p -m 0700 \"$CACHE_DIR\"; TMP_FILE=$(mktemp -p \"$CACHE_DIR\" artwork.XXXXXX); trap 'rm -f \"${TMP_FILE:-}\"' EXIT; if [[ \"$URL\" =~ ^https:// ]]; then HTTP_CODE=$(curl -sS --connect-timeout 3 --max-time 10 --retry 2 --retry-delay 1 --retry-max-time 25 --max-filesize 2097152 --proto \"=https\" -w \"%{http_code}\" \"$URL\" -o \"$TMP_FILE\" 2>/dev/null || echo \"000\"); if [[ \"$HTTP_CODE\" != \"200\" ]]; then exit 1; fi; elif [[ \"$URL\" =~ ^file://(/.*) ]] || [[ \"$URL\" =~ ^(/.*) ]]; then FILE_PATH=\"${BASH_REMATCH[1]}\"; python3 -c '\nimport os,stat,sys\np=sys.argv[1]\nfd=os.open(p,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC)\nst=os.fstat(fd)\nif not(stat.S_ISREG(st.st_mode) and 4<=st.st_size<=2097152):\n os.close(fd)\n sys.exit(1)\nd=os.read(fd,2097152)\nos.close(fd)\nsys.stdout.buffer.write(d)\n' \"$FILE_PATH\" > \"$TMP_FILE\" 2>/dev/null; else exit 1; fi; MAGIC=$(od -N 12 -A n -t x1 \"$TMP_FILE\" 2>/dev/null | tr -d \" \\n\"); if [[ \"$MAGIC\" =~ ^89504e470d0a1a0a ]] || [[ \"$MAGIC\" =~ ^ffd8 ]] || [[ \"$MAGIC\" =~ ^47494638 ]] || [[ \"$MAGIC\" =~ ^424d ]] || [[ \"$MAGIC\" =~ ^52494646.{8}57454250 ]]; then mv -f \"$TMP_FILE\" \"$CACHE_FILE\"; exit 0; else exit 1; fi",
       "--",
       raw,
       root.artworkCachePath
@@ -534,16 +424,12 @@ Item {
       var preferred = playerForKey(preferredPlayerKey)
       if (preferred && hasMetadata(preferred)) {
         if (isPlayerActive(preferred)) {
-          lastActivePlayerKey = preferredPlayerKey
           return preferred
         }
         // Preferred player is paused — check if any OTHER player is actively playing
         var otherPlaying = mostRecentPlayingPlayer()
         if (otherPlaying) {
           // A different player is actively playing — switch to the actively playing player
-          preferredPlayerKey = ""
-          var k = playerCanonicalKey(otherPlaying)
-          if (k) lastActivePlayerKey = k
           return otherPlaying
         }
         // Nothing else is playing — keep showing the preferred player (paused)
@@ -554,8 +440,6 @@ Item {
     // 2. Currently playing player (picks most recently started)
     var playingPlayer = mostRecentPlayingPlayer()
     if (playingPlayer) {
-      var pk = playerCanonicalKey(playingPlayer)
-      if (pk) lastActivePlayerKey = pk
       return playingPlayer
     }
 
@@ -571,8 +455,6 @@ Item {
     for (var i = 0; i < players.length; i++) {
       var p = players[i]
       if (p && !isProxyPlayer(p) && hasMetadata(p)) {
-        var fKey = playerCanonicalKey(p)
-        if (fKey) lastActivePlayerKey = fKey
         return p
       }
     }
@@ -802,8 +684,8 @@ Item {
     return handled
   }
 
-  Component.onCompleted: root.syncPlayingOrder()
-  onPlayersChanged: root.syncPlayingOrder()
+  Component.onCompleted: Qt.callLater(root.syncPlayingOrder)
+  onPlayersChanged: Qt.callLater(root.syncPlayingOrder)
 
   Timer {
     id: trackOsdTimer
@@ -835,10 +717,8 @@ Item {
       serviceIsPlaying: root.isPlaying,
       audioLevel: root.audioLevel,
       activePlayerStreamFound: root.activePlayerStream !== null,
-      audioCandidateStreamCount: root.audioCandidateStreams.length,
-      audioLevelUnreliable: root.audioLevelUnreliable,
-      audioLevelZeroStreak: root.audioLevelZeroStreak,
-      fallbackPeakActive: root.fallbackPeakActive,
+      spectrumReady: root.spectrumReady,
+      spectrumBandCount: root.spectrum.length,
       identity: finalIdentity,
       desktopEntry: finalDesktop,
       title: finalTitle,
