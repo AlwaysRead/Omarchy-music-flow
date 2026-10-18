@@ -38,14 +38,14 @@ Use Omarchy’s plugin manager:
 omarchy plugin add https://github.com/AlwaysRead/Omarchy-music-flow.git --enable
 ```
 
-The plugin ID is `custom.media`. It replaces the stock `omarchy.media` widget. The upstream plugin uses the same ID, so install only one version at a time. MPV requires an existing MPRIS integration such as `mpv-mpris`.
+The plugin ID is `io.github.alwaysread.music-flow`. It replaces the stock `omarchy.media` widget. The fork has its own marketplace ID; upstream retains `custom.media`. MPV requires an existing MPRIS integration such as `mpv-mpris`.
 
 ## Work directly from a checkout
 
 The local development setup uses a symlink:
 
 ```text
-~/.config/omarchy/plugins/custom.media -> ~/Projects/Omarchy-music-flow
+~/.config/omarchy/plugins/io.github.alwaysread.music-flow -> ~/Projects/Omarchy-music-flow
 ```
 
 Edit the checkout and run `omarchy restart shell` if the running widget retains cached code. Keep an existing plugin directory backed up before replacing it with a symlink.
@@ -71,7 +71,7 @@ Preferences live in the widget’s entry under `bar.layout` in `~/.config/omarch
 
 ```json
 {
-  "id": "custom.media",
+  "id": "io.github.alwaysread.music-flow",
   "showBarThumbnail": true,
   "showAppLogo": false,
   "showText": true,
@@ -79,15 +79,15 @@ Preferences live in the widget’s entry under `bar.layout` in `~/.config/omarch
 }
 ```
 
-Valid animation values are `wave`, `bars`, `dots`, `particles`, `equalizer`, and `ribbon`. Settings can be changed in the popup or with `omarchy bar set custom.media <setting> <value> --json`.
+Valid animation values are `wave`, `bars`, `dots`, `particles`, `equalizer`, and `ribbon`. Settings can be changed in the popup or with `omarchy bar set io.github.alwaysread.music-flow <setting> <value> --json`.
 
 ## Update or remove
 
 For a plugin installed through Omarchy:
 
 ```bash
-omarchy plugin update custom.media
-omarchy plugin remove custom.media
+omarchy plugin update io.github.alwaysread.music-flow
+omarchy plugin remove io.github.alwaysread.music-flow
 ```
 
 For a development checkout linked into the plugin directory, pull changes in that checkout and restart the shell. Keep local edits committed before pulling. This repository uses Omarchy’s plugin manager rather than custom installation scripts.
@@ -106,6 +106,16 @@ README.md / CREDITS.md / LICENSE
 ```
 
 QML entry points stay at the repository root because the shell loads them from the plugin manifest. Only runtime code, configuration, translations, documentation, and attribution are included. Screenshots, preview assets, tests, CI workflows, and custom maintenance scripts are omitted.
+
+## Validation
+
+The fork uses the globally namespaced ID `io.github.alwaysread.music-flow`. Marketplace compatibility and security-baseline checks are run against an exact published commit. A passing local check is not marketplace approval; listing still requires the marketplace’s maintainer review. A preview image is optional.
+
+```bash
+omarchy plugin validate .
+qmllint BarWidget.qml Service.qml
+omarchy-shell io.github.alwaysread.music-flow status
+```
 
 ## License
 

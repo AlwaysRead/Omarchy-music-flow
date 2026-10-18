@@ -10,7 +10,7 @@ import "MediaModel.js" as MediaModel
 
 BarWidget {
   id: root
-  moduleName: "custom.media"
+  moduleName: "io.github.alwaysread.music-flow"
 
   property var service: null
   property string visualizerMode: {
@@ -28,21 +28,21 @@ BarWidget {
   function toggleTrackText() {
     if (textPreference.running) return
     root.showText = !root.showText
-    textPreference.command = ["omarchy", "bar", "set", "custom.media", "showText", root.showText ? "true" : "false", "--json"]
+    textPreference.command = ["omarchy", "bar", "set", root.moduleName, "showText", root.showText ? "true" : "false", "--json"]
     textPreference.running = true
   }
 
   function selectAnimation(mode) {
     if (animationPreference.running) return
     root.visualizerMode = mode
-    animationPreference.command = ["omarchy", "bar", "set", "custom.media", "visualizerMode", mode, "--json"]
+    animationPreference.command = ["omarchy", "bar", "set", root.moduleName, "visualizerMode", mode, "--json"]
     animationPreference.running = true
     waveCanvas.requestPaint()
   }
 
   // The original repo registered this plugin under a per-user id
   // (${USER_NAME}.media) before this fork switched to the fixed
-  // "custom.media" id above. Derive that legacy id from the account
+  // "io.github.alwaysread.music-flow" id above. Derive that legacy id from the account
   // actually running the shell instead of a hardcoded name - a literal
   // like "nek0.media" only ever matched one specific developer's own
   // machine and was a no-op fallback for everyone else.
@@ -56,8 +56,8 @@ BarWidget {
     if (!root.bar || !root.bar.shell) return null
     if (root.moduleName && root.bar.shell.serviceFor(root.moduleName))
       return root.bar.shell.serviceFor(root.moduleName)
-    if (root.bar.shell.serviceFor("custom.media"))
-      return root.bar.shell.serviceFor("custom.media")
+    if (root.bar.shell.serviceFor("io.github.alwaysread.music-flow"))
+      return root.bar.shell.serviceFor("io.github.alwaysread.music-flow")
     if (root.legacyUserPluginId && root.bar.shell.serviceFor(root.legacyUserPluginId))
       return root.bar.shell.serviceFor(root.legacyUserPluginId)
     if (root.bar.shell.serviceFor("omarchy.media"))
@@ -943,7 +943,7 @@ BarWidget {
           enabled: !thumbnailPreference.running
           onClicked: {
             root.showBarThumbnail = !root.showBarThumbnail
-            thumbnailPreference.command = ["omarchy", "bar", "set", "custom.media", "showBarThumbnail", root.showBarThumbnail ? "true" : "false", "--json"]
+            thumbnailPreference.command = ["omarchy", "bar", "set", root.moduleName, "showBarThumbnail", root.showBarThumbnail ? "true" : "false", "--json"]
             thumbnailPreference.running = true
           }
         }
@@ -962,7 +962,7 @@ BarWidget {
           enabled: !appLogoPreference.running
           onClicked: {
             root.showAppLogo = !root.showAppLogo
-            appLogoPreference.command = ["omarchy", "bar", "set", "custom.media", "showAppLogo", root.showAppLogo ? "true" : "false", "--json"]
+            appLogoPreference.command = ["omarchy", "bar", "set", root.moduleName, "showAppLogo", root.showAppLogo ? "true" : "false", "--json"]
             appLogoPreference.running = true
           }
         }

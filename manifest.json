@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "id": "custom.media",
+  "id": "io.github.alwaysread.music-flow",
   "name": "Music Flow (customized fork)",
   "version": "1.0.0",
-  "author": "Clifford Baidoo",
+  "author": "AlwaysRead; original: Clifford Baidoo",
   "license": "MIT",
   "description": "Customized fork of Clifford Baidoo\u2019s Music Flow with CAVA visualization and saved display preferences",
   "kinds": [

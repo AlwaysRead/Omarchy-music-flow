@@ -736,7 +736,7 @@ Item {
 
 
   IpcHandler {
-    target: "media"
+    target: "io.github.alwaysread.music-flow"
 
     function status(): string {
       return root.statusJson()
