@@ -19,57 +19,73 @@ BarWidget {
   }
   property bool showBarThumbnail: setting("showBarThumbnail", true) === true
   property bool showAppLogo: setting("showAppLogo", true) === true
-  Process { id: appLogoPreference }
-  Process { id: thumbnailPreference }
-  Process { id: textPreference }
-  Process { id: animationPreference }
   property bool showText: setting("showText", true) === true
+  property bool preferencePending: false
+  readonly property bool preferenceBusy: preferencePending
 
-  function toggleTrackText() {
-    if (textPreference.running) return
-    root.showText = !root.showText
-    textPreference.command = ["omarchy", "bar", "set", root.moduleName, "showText", root.showText ? "true" : "false", "--json"]
-    textPreference.running = true
+  function finishPreference(success) {
+    if (!preferencePending) return
+    preferencePending = false
+    preferenceTimeout.stop()
+    restorePreferenceBindings()
+    if (!success) console.warn("Music Flow: could not save display preference")
   }
 
-  function selectAnimation(mode) {
-    if (animationPreference.running) return
-    root.visualizerMode = mode
-    animationPreference.command = ["omarchy", "bar", "set", root.moduleName, "visualizerMode", mode, "--json"]
-    animationPreference.running = true
-    waveCanvas.requestPaint()
+  function restorePreferenceBindings() {
+    root.showText = Qt.binding(function() { return root.setting("showText", true) === true })
+    root.showAppLogo = Qt.binding(function() { return root.setting("showAppLogo", true) === true })
+    root.showBarThumbnail = Qt.binding(function() { return root.setting("showBarThumbnail", true) === true })
+    root.visualizerMode = Qt.binding(function() {
+      var value = root.setting("visualizerMode", "wave")
+      return ["wave", "bars", "dots", "particles", "equalizer", "ribbon"].indexOf(value) >= 0 ? value : "wave"
+    })
   }
 
-  // The original repo registered this plugin under a per-user id
-  // (${USER_NAME}.media) before this fork switched to the fixed
-  // "io.github.alwaysread.music-flow" id above. Derive that legacy id from the account
-  // actually running the shell instead of a hardcoded name - a literal
-  // like "nek0.media" only ever matched one specific developer's own
-  // machine and was a no-op fallback for everyone else.
-  readonly property string legacyUserPluginId: {
-    var u = Quickshell.env("USER") || Quickshell.env("LOGNAME") || ""
-    return u ? (u + ".media") : ""
+  function setPreference(name, value) {
+    if (preferenceBusy) return false
+    var booleans = ["showText", "showAppLogo", "showBarThumbnail"]
+    if (booleans.indexOf(name) >= 0) {
+      if (typeof value !== "boolean") return false
+    } else if (name !== "visualizerMode" || ["wave", "bars", "dots", "particles", "equalizer", "ribbon"].indexOf(value) < 0) {
+      return false
+    }
+    root[name] = value
+    preferencePending = true
+    preferenceWriter.command = ["omarchy", "bar", "set", root.moduleName, name, String(value), "--json"]
+    preferenceWriter.running = true
+    preferenceTimeout.restart()
+    return true
   }
 
+  function toggleTrackText() { setPreference("showText", !showText) }
+  function selectAnimation(mode) { setPreference("visualizerMode", mode) }
+
+  Process {
+    id: preferenceWriter
+    onExited: function(exitCode) { root.finishPreference(exitCode === 0) }
+    onRunningChanged: if (!running) Qt.callLater(function() {
+      if (!preferenceWriter.running) root.finishPreference(false)
+    })
+  }
+
+  Timer {
+    id: preferenceTimeout
+    interval: 10000
+    onTriggered: {
+      if (preferenceWriter.running) preferenceWriter.signal(9)
+      else root.finishPreference(false)
+    }
+  }
+
+  // Use this plugin's service only; never control a legacy or unrelated widget.
   readonly property var mediaService: {
     if (service) return service
-    if (!root.bar || !root.bar.shell) return null
-    if (root.moduleName && root.bar.shell.serviceFor(root.moduleName))
-      return root.bar.shell.serviceFor(root.moduleName)
-    if (root.bar.shell.serviceFor("io.github.alwaysread.music-flow"))
-      return root.bar.shell.serviceFor("io.github.alwaysread.music-flow")
-    if (root.legacyUserPluginId && root.bar.shell.serviceFor(root.legacyUserPluginId))
-      return root.bar.shell.serviceFor(root.legacyUserPluginId)
-    if (root.bar.shell.serviceFor("omarchy.media"))
-      return root.bar.shell.serviceFor("omarchy.media")
-    if (root.bar.shell.firstPartyServiceFor("omarchy.media"))
-      return root.bar.shell.firstPartyServiceFor("omarchy.media")
-    return null
+    return root.bar && root.bar.shell ? root.bar.shell.serviceFor(root.moduleName) : null
   }
 
   function deduplicatePlayers(players) {
     var list = []
-    var seen = {}
+    var seen = Object.create(null)
     var raw = players || []
     for (var i = 0; i < raw.length; i++) {
       var p = raw[i]
@@ -91,7 +107,8 @@ BarWidget {
       var p = list[i]
       if (!p) continue
       if (p.isPlaying) return p
-      if (!fallback && (p.trackTitle || p.trackArtist || p.canPlay)) fallback = p
+      if (p.playbackState === MprisPlaybackState.Paused) fallback = p
+      else if (!fallback && (p.trackTitle || p.trackArtist || p.canPlay)) fallback = p
     }
     return fallback
   }
@@ -129,33 +146,11 @@ BarWidget {
   }
 
   readonly property var spectrum: mediaService && mediaService.spectrum ? mediaService.spectrum : []
-  readonly property real currentEnergy: mediaService ? mediaService.audioLevel : 0
-  property int positionTick: 0
-  readonly property real trackLength: activePlayer && activePlayer.lengthSupported ? Math.max(0, activePlayer.length) : 0
-  readonly property real trackPosition: {
-    var tick = positionTick
-    return activePlayer && activePlayer.positionSupported ? Math.max(0, Math.min(trackLength, activePlayer.position)) : 0
-  }
-  readonly property bool hasTrackProgress: Boolean(activePlayer && activePlayer.positionSupported && trackLength > 0)
-
-  function formatTime(seconds) {
-    var total = Math.max(0, Math.floor(seconds || 0))
-    var minutes = Math.floor(total / 60)
-    var remainder = total % 60
-    return minutes + ":" + (remainder < 10 ? "0" : "") + remainder
-  }
-
-  Timer {
-    interval: 500
-    repeat: true
-    running: root.popupOpen && root.hasTrackProgress && Boolean(root.activePlayer && root.activePlayer.isPlaying)
-    onTriggered: root.positionTick++
-  }
+  readonly property bool isLiveStream: MediaModel.isLiveStream(activePlayer)
   onSpectrumChanged: { if (waveCanvas.visible) waveCanvas.requestPaint() }
   onIsPlayingChanged: waveCanvas.requestPaint()
 
   readonly property bool hasMedia: activePlayer !== null && (Boolean(title) || Boolean(isPlaying) || Boolean(activePlayer.trackTitle || activePlayer.trackArtist))
-  readonly property string playIcon: isPlaying ? "󰏤" : "󰐊"
   
   readonly property string title: {
     if (mediaService && mediaService.title) return MediaModel.sanitizeText(mediaService.title)
@@ -184,66 +179,16 @@ BarWidget {
     return ""
   }
 
-  property string verifiedArtUrl: ""
-  readonly property string rawCandidateArtUrl: {
-    if (mediaService) return ""
-    if (!activePlayer) return ""
-    return MediaModel.extractArtUrl(activePlayer)
-  }
-
-  readonly property string artUrl: {
-    var cached = mediaService ? String(mediaService.artUrl || "") : ""
-    // The service has validated raster bytes before writing this exact cache.
-    // Keep its timestamp query so Qt reloads the image when the track changes.
-    var expected = "file://" + artworkCachePath
-    if (cached === expected || (cached.indexOf(expected + "?t=") === 0 && /^\d+$/.test(cached.slice(expected.length + 3)))) return cached
-    if (MediaModel.isRasterDataUri(cached)) return cached
-    return verifiedArtUrl
-  }
-  readonly property string artworkCachePath: (Quickshell.env("XDG_CACHE_HOME") || (Quickshell.env("HOME") + "/.cache")) + "/omarchy/music-flow/artwork.cache"
-
-  onRawCandidateArtUrlChanged: {
-    var raw = root.rawCandidateArtUrl
-    if (!raw) {
-      artFetchProc.running = false
-      root.verifiedArtUrl = ""
-      return
-    }
-
-    if (MediaModel.isRasterDataUri(raw)) {
-      artFetchProc.running = false
-      root.verifiedArtUrl = raw
-      return
-    }
-
-    // Remote HTTPS or local file: validate & cache with strict byte limits, no redirects, secure mktemp, and magic byte check
-    root.verifiedArtUrl = ""
-    artFetchProc.running = false
-    artFetchProc.command = [
-      "bash", "-c",
-      "set -euo pipefail; URL=\"$1\"; CACHE_FILE=\"$2\"; CACHE_DIR=\"$(dirname \"$CACHE_FILE\")\"; mkdir -p -m 0700 \"$CACHE_DIR\"; TMP_FILE=$(mktemp -p \"$CACHE_DIR\" artwork.XXXXXX); trap 'rm -f \"${TMP_FILE:-}\"' EXIT; if [[ \"$URL\" =~ ^https:// ]]; then HTTP_CODE=$(curl -sS --connect-timeout 3 --max-time 10 --retry 2 --retry-delay 1 --retry-max-time 25 --max-filesize 2097152 --proto \"=https\" -w \"%{http_code}\" \"$URL\" -o \"$TMP_FILE\" 2>/dev/null || echo \"000\"); if [[ \"$HTTP_CODE\" != \"200\" ]]; then exit 1; fi; elif [[ \"$URL\" =~ ^file://(/.*) ]] || [[ \"$URL\" =~ ^(/.*) ]]; then FILE_PATH=\"${BASH_REMATCH[1]}\"; python3 -c '\nimport os,stat,sys\nfrom urllib.parse import unquote, urlsplit\np=unquote(urlsplit(sys.argv[1]).path)\nfd=os.open(p,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC)\nst=os.fstat(fd)\nif not(stat.S_ISREG(st.st_mode) and 4<=st.st_size<=2097152):\n os.close(fd)\n sys.exit(1)\nd=os.read(fd,2097152)\nos.close(fd)\nsys.stdout.buffer.write(d)\n' \"$FILE_PATH\" > \"$TMP_FILE\" 2>/dev/null; else exit 1; fi; MAGIC=$(od -N 12 -A n -t x1 \"$TMP_FILE\" 2>/dev/null | tr -d \" \\n\"); if [[ \"$MAGIC\" =~ ^89504e470d0a1a0a ]] || [[ \"$MAGIC\" =~ ^ffd8 ]] || [[ \"$MAGIC\" =~ ^47494638 ]] || [[ \"$MAGIC\" =~ ^424d ]] || [[ \"$MAGIC\" =~ ^52494646.{8}57454250 ]]; then mv -f \"$TMP_FILE\" \"$CACHE_FILE\"; exit 0; else exit 1; fi",
-      "--",
-      raw,
-      root.artworkCachePath
-    ]
-    artFetchProc.running = true
-  }
-
-  Process {
-    id: artFetchProc
-    onExited: function(exitCode) {
-      if (exitCode === 0) {
-        root.verifiedArtUrl = "file://" + root.artworkCachePath + "?t=" + Date.now()
-      } else {
-        root.verifiedArtUrl = ""
-      }
-    }
+  readonly property string artUrl: mediaService ? String(mediaService.artUrl || "") : fallbackArtwork.url
+  Artwork {
+    id: fallbackArtwork
+    source: !root.mediaService && root.activePlayer ? MediaModel.extractArtUrl(root.activePlayer) : ""
+    fallbackSource: !root.mediaService && root.activePlayer ? MediaModel.extractArtUrl(root.activePlayer, true) : ""
   }
 
   PluginCommons.Translations { id: localStrings; directory: Qt.resolvedUrl("local-i18n") }
   property bool settingsOpen: false
   property bool popupOpen: false
-  property bool isMinimized: false
 
   readonly property bool opened: popupOpen
   function open() { popupOpen = true }
@@ -263,21 +208,27 @@ BarWidget {
 
   function runAction(action, targetPlayer) {
     var p = targetPlayer || activePlayer
-    if (!p) return
+    if (!p || !MediaModel.canHandleAction(p, action)) return false
     if (mediaService && typeof mediaService.runAction === "function") {
-      mediaService.runAction(action, false, playerKey(p))
-      return
+      return mediaService.runAction(action, false, playerKey(p))
     }
     if (action === "playPause") {
-      if (typeof p.togglePlaying === "function") p.togglePlaying()
-      else if (typeof p.playPause === "function") p.playPause()
-      else if (p.isPlaying && typeof p.pause === "function") p.pause()
-      else if (typeof p.play === "function") p.play()
-    } else if (action === "next" && typeof p.next === "function") {
-      p.next()
-    } else if (action === "previous" && typeof p.previous === "function") {
-      p.previous()
-    }
+      if (p.canTogglePlaying && typeof p.togglePlaying === "function") p.togglePlaying()
+      else if (p.isPlaying && p.canPause) p.pause()
+      else if (!p.isPlaying && p.canPlay) p.play()
+      else return false
+    } else if (action === "play") {
+      if (p.canPlay) p.play()
+      else if (!p.isPlaying && p.canTogglePlaying) p.togglePlaying()
+      else return false
+    } else if (action === "pause") {
+      if (p.canPause) p.pause()
+      else if (p.isPlaying && p.canTogglePlaying) p.togglePlaying()
+      else return false
+    } else if (action === "next") p.next()
+    else if (action === "previous") p.previous()
+    else return false
+    return true
   }
 
   function selectPlayer(targetPlayer) {
@@ -285,12 +236,8 @@ BarWidget {
     var key = playerKey(targetPlayer)
     if (mediaService && typeof mediaService.selectPlayer === "function") {
       mediaService.selectPlayer(key)
-    } else {
-      if (typeof targetPlayer.play === "function") {
-        targetPlayer.play()
-      } else if (typeof targetPlayer.togglePlaying === "function") {
-        targetPlayer.togglePlaying()
-      }
+    } else if (!targetPlayer.isPlaying) {
+      root.runAction("play", targetPlayer)
     }
   }
 
@@ -320,10 +267,8 @@ BarWidget {
   BorderSurface {
     id: pill
     anchors.centerIn: parent
-    height: Math.min(parent.height - Style.space(6), Style.space(28))
-    width: root.isMinimized
-      ? height
-      : (root.showText ? (flowRow.implicitWidth + Style.space(16)) : Math.max(Style.space(110), flowRow.implicitWidth + Style.space(16)))
+    height: Math.max(0, Math.min(parent.height - Style.space(6), Style.space(28)))
+    width: root.showText ? (flowRow.implicitWidth + Style.space(16)) : Math.max(Style.space(110), flowRow.implicitWidth + Style.space(16))
     radius: Style.cornerRadius
     clip: true
     color: clickArea.containsMouse ? Util.alpha(root.bar ? root.bar.barForeground : Color.foreground, 0.05) : "transparent"
@@ -344,7 +289,6 @@ BarWidget {
       anchors.leftMargin: barThumbnail.visible
         ? Style.space(8) + barThumbnail.width + Style.space(7)
         : Style.space(2)
-      visible: !root.isMinimized
       readonly property bool highContrast: !root.showBarThumbnail && !root.showAppLogo && !root.showText
       opacity: highContrast ? 1.0 : 0.55
       onHighContrastChanged: requestPaint()
@@ -410,30 +354,12 @@ BarWidget {
       }
     }
 
-    // Minimized Mode (Single icon)
-    Item {
-      anchors.fill: parent
-      visible: root.isMinimized
-
-      Text {
-        anchors.centerIn: parent
-        text: "󰝚"
-        textFormat: Text.PlainText
-        color: root.isPlaying ? Color.accent : (clickArea.containsMouse ? Color.accent : (root.bar ? root.bar.barForeground : Color.foreground))
-        font.family: root.bar ? root.bar.fontFamily : Style.font.family
-        font.pixelSize: Style.font.body
-        font.bold: true
-        Behavior on color { ColorAnimation { duration: 140 } }
-      }
-    }
-
     // Thumbnail, app logo, and track text each follow their own display toggle.
     Row {
       id: flowRow
       anchors.verticalCenter: parent.verticalCenter
       x: barThumbnail.visible ? Style.space(8) : (parent.width - width) / 2
       spacing: Style.space(7)
-      visible: !root.isMinimized
 
       Item {
         id: barThumbnail
@@ -486,6 +412,7 @@ BarWidget {
       // Track Title & Artist with smooth marquee scroll, or idle placeholder
       Item {
         id: scrollClip
+        onWidthChanged: Qt.callLater(titleRow.resetScroll)
         width: root.hasMedia ? Math.min(root.maxLabelWidth, titleRow.implicitWidth) : idleLabel.implicitWidth
         height: Math.max(glyph.implicitHeight, Style.space(16))
         clip: true
@@ -511,6 +438,15 @@ BarWidget {
           anchors.verticalCenter: parent.verticalCenter
 
           property bool needsScroll: titleRow.implicitWidth > root.maxLabelWidth
+          readonly property bool shouldScroll: needsScroll && !root.popupOpen && (!root.bar || !root.bar.vertical) && root.hasMedia && root.showText && !Style.reduceMotion
+          onShouldScrollChanged: Qt.callLater(resetScroll)
+          onImplicitWidthChanged: Qt.callLater(resetScroll)
+
+          function resetScroll() {
+            scrollAnim.stop()
+            titleRow.x = 0
+            if (shouldScroll) scrollAnim.start()
+          }
 
           Text {
             id: titleText
@@ -547,11 +483,12 @@ BarWidget {
 
           SequentialAnimation on x {
             id: scrollAnim
-            running: titleRow.needsScroll && !root.popupOpen && (!root.bar || !root.bar.vertical) && root.hasMedia && !root.isMinimized && root.showText
             loops: Animation.Infinite
+            onStopped: titleRow.x = 0
 
             PauseAnimation { duration: 2500 }
             NumberAnimation {
+              from: 0
               to: -(titleRow.implicitWidth - scrollClip.width)
               duration: Math.max(3000, (titleRow.implicitWidth - scrollClip.width) * 35)
               easing.type: Easing.Linear
@@ -593,7 +530,7 @@ BarWidget {
         root.runAction("next", root.activePlayer)
       }
     }
-    onEntered: if (root.bar) root.bar.showTooltip(root, root.hasMedia ? MediaModel.sanitizeText(root.title + (root.artist ? " — " + root.artist : "")) : "Music Player (Right-click: Toggle Text)")
+    onEntered: if (root.bar) root.bar.showTooltip(root, root.hasMedia ? MediaModel.safeSharedText(root.title + (root.artist ? " — " + root.artist : "")) : "Music Player (Right-click: Toggle Text)")
     onExited: if (root.bar) root.bar.hideTooltip(root)
   }
 
@@ -673,44 +610,55 @@ BarWidget {
               font.bold: true
               anchors.verticalCenter: parent.verticalCenter
             }
+            Text {
+              visible: root.isLiveStream
+              text: localStrings.t("player.live")
+              anchors.verticalCenter: parent.verticalCenter
+              leftPadding: Style.space(4)
+              textFormat: Text.PlainText
+              color: Color.accent
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.caption
+              font.bold: true
+            }
           }
 
-          Text {
+          MarqueeText {
             text: root.title || "Nothing playing"
-            textFormat: Text.PlainText
             color: root.bar ? root.bar.foreground : Color.foreground
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
             font.pixelSize: Style.font.subtitle
             font.bold: true
-            elide: Text.ElideRight
             width: parent.width
+            animationEnabled: root.popupOpen && !Style.reduceMotion
           }
 
-          Text {
+          MarqueeText {
             text: root.artist
-            textFormat: Text.PlainText
             color: Qt.darker(root.bar ? root.bar.foreground : Color.foreground, 1.3)
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
             font.pixelSize: Style.font.bodySmall
-            elide: Text.ElideRight
             width: parent.width
+            animationEnabled: root.popupOpen && !Style.reduceMotion
             visible: text !== ""
           }
 
-          Text {
+          MarqueeText {
             text: root.album
-            textFormat: Text.PlainText
             color: Qt.darker(root.bar ? root.bar.foreground : Color.foreground, 1.6)
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
             font.pixelSize: Style.font.caption
-            elide: Text.ElideRight
             width: parent.width
+            animationEnabled: root.popupOpen && !Style.reduceMotion
             visible: text !== ""
           }
         }
+
         Button {
           id: settingsGear
-          bordered: true
+          width: Style.space(24)
+          height: Style.space(24)
+          iconSize: Style.font.bodySmall
           iconText: "󰒓"
           tooltipText: localStrings.t("settings.title")
           foreground: root.bar ? root.bar.foreground : Color.foreground
@@ -720,111 +668,55 @@ BarWidget {
         }
       }
 
-      Column {
+
+
+      // Centered playback controls.
+      Item {
         width: parent.width
-        spacing: Style.space(2)
-        visible: root.hasTrackProgress
-
-        PanelSlider {
-          id: progressSlider
-          width: parent.width
-          bar: root.bar
-          minimum: 0
-          maximum: Math.max(1, root.trackLength)
-          step: 5
-          value: root.trackPosition
-          enabled: Boolean(root.activePlayer && root.activePlayer.canSeek)
-          opacity: enabled ? 1 : 0.6
-          fillColor: Color.accent
-          knobColor: Color.accent
-          property var targetPlayer: null
-          property string targetTrack: ""
-          onDraggingChanged: {
-            if (dragging) {
-              targetPlayer = root.activePlayer
-              targetTrack = MediaModel.trackSignature(targetPlayer)
-            }
-          }
-          onMoved: function(value) {
-            if (!dragging) {
-              targetPlayer = root.activePlayer
-              targetTrack = MediaModel.trackSignature(targetPlayer)
-            }
-          }
-          onReleased: function(value) {
-            if (targetPlayer && targetPlayer === root.activePlayer
-                && targetTrack === MediaModel.trackSignature(targetPlayer)
-                && targetPlayer.canSeek && targetPlayer.positionSupported) {
-              targetPlayer.position = Math.max(0, Math.min(root.trackLength, value))
-              root.positionTick++
-            }
-            targetPlayer = null
-          }
-        }
-
+        height: Style.space(40)
         Row {
-          width: parent.width
-          Text {
-            width: parent.width / 2
-            text: root.formatTime(progressSlider.dragging ? progressSlider.liveValue : root.trackPosition)
-            textFormat: Text.PlainText
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            font.pixelSize: Style.font.caption
-            color: Util.alpha(root.bar ? root.bar.foreground : Color.foreground, 0.65)
+          anchors.centerIn: parent
+          spacing: Style.space(12)
+
+          Button {
+            iconText: "󰒮"
+            width: Style.space(40)
+            height: Style.space(40)
+            foreground: root.bar ? root.bar.foreground : Color.foreground
+            horizontalPadding: Style.spacing.controlPaddingX
+            verticalPadding: Style.spacing.controlPaddingY
+            enabled: Boolean(root.activePlayer && root.activePlayer.canGoPrevious)
+            opacity: enabled ? 1.0 : 0.4
+            onClicked: root.runAction("previous", root.activePlayer)
           }
-          Text {
-            width: parent.width / 2
-            horizontalAlignment: Text.AlignRight
-            text: root.formatTime(root.trackLength)
-            textFormat: Text.PlainText
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
-            font.pixelSize: Style.font.caption
-            color: Util.alpha(root.bar ? root.bar.foreground : Color.foreground, 0.65)
+
+          Button {
+            iconText: root.isPlaying ? "󰏤" : "󰐊"
+            width: Style.space(40)
+            height: Style.space(40)
+            foreground: Color.accent
+            horizontalPadding: Style.spacing.controlPaddingX
+            verticalPadding: Style.spacing.controlPaddingY
+            iconSize: Style.font.iconLarge
+            enabled: Boolean(root.activePlayer && (root.activePlayer.canTogglePlaying || root.activePlayer.canPlay || root.activePlayer.canPause || root.isPlaying))
+            opacity: enabled ? 1.0 : 0.4
+            onClicked: root.runAction("playPause", root.activePlayer)
+          }
+
+          Button {
+            iconText: "󰒭"
+            width: Style.space(40)
+            height: Style.space(40)
+            foreground: root.bar ? root.bar.foreground : Color.foreground
+            horizontalPadding: Style.spacing.controlPaddingX
+            verticalPadding: Style.spacing.controlPaddingY
+            enabled: Boolean(root.activePlayer && root.activePlayer.canGoNext)
+            opacity: enabled ? 1.0 : 0.4
+            onClicked: root.runAction("next", root.activePlayer)
           }
         }
-      }
 
-      // Playback Controls
-      Row {
-        anchors.horizontalCenter: parent.horizontalCenter
-        spacing: Style.space(12)
 
-        Button {
-          iconText: "󰒮"
-          width: Style.space(40)
-          height: Style.space(40)
-          foreground: root.bar ? root.bar.foreground : Color.foreground
-          horizontalPadding: Style.spacing.controlPaddingX
-          verticalPadding: Style.spacing.controlPaddingY
-          enabled: Boolean(root.activePlayer && root.activePlayer.canGoPrevious)
-          opacity: enabled ? 1.0 : 0.4
-          onClicked: root.runAction("previous", root.activePlayer)
-        }
-
-        Button {
-          iconText: root.isPlaying ? "󰏤" : "󰐊"
-          width: Style.space(40)
-          height: Style.space(40)
-          foreground: Color.accent
-          horizontalPadding: Style.spacing.controlPaddingX
-          verticalPadding: Style.spacing.controlPaddingY
-          iconSize: Style.font.iconLarge
-          enabled: Boolean(root.activePlayer && (root.activePlayer.canTogglePlaying || root.activePlayer.canPlay || root.activePlayer.canPause || root.isPlaying))
-          opacity: enabled ? 1.0 : 0.4
-          onClicked: root.runAction("playPause", root.activePlayer)
-        }
-
-        Button {
-          iconText: "󰒭"
-          width: Style.space(40)
-          height: Style.space(40)
-          foreground: root.bar ? root.bar.foreground : Color.foreground
-          horizontalPadding: Style.spacing.controlPaddingX
-          verticalPadding: Style.spacing.controlPaddingY
-          enabled: Boolean(root.activePlayer && root.activePlayer.canGoNext)
-          opacity: enabled ? 1.0 : 0.4
-          onClicked: root.runAction("next", root.activePlayer)
-        }
       }
 
       // Per-Source Volume (the PipeWire stream correlated to the active player)
@@ -909,6 +801,7 @@ BarWidget {
               text: localStrings.t("animation." + modelData.key)
               fontSize: Style.font.bodySmall
               foreground: root.bar ? root.bar.foreground : Color.foreground
+              enabled: !root.preferenceBusy
               selected: root.visualizerMode === modelData.id
               bordered: true
               focusable: true
@@ -940,12 +833,8 @@ BarWidget {
           bordered: true
           foreground: root.bar ? root.bar.foreground : Color.foreground
           focusable: true
-          enabled: !thumbnailPreference.running
-          onClicked: {
-            root.showBarThumbnail = !root.showBarThumbnail
-            thumbnailPreference.command = ["omarchy", "bar", "set", root.moduleName, "showBarThumbnail", root.showBarThumbnail ? "true" : "false", "--json"]
-            thumbnailPreference.running = true
-          }
+          enabled: !root.preferenceBusy
+          onClicked: root.setPreference("showBarThumbnail", !root.showBarThumbnail)
         }
 
         Button {
@@ -959,12 +848,8 @@ BarWidget {
           bordered: true
           foreground: root.bar ? root.bar.foreground : Color.foreground
           focusable: true
-          enabled: !appLogoPreference.running
-          onClicked: {
-            root.showAppLogo = !root.showAppLogo
-            appLogoPreference.command = ["omarchy", "bar", "set", root.moduleName, "showAppLogo", root.showAppLogo ? "true" : "false", "--json"]
-            appLogoPreference.running = true
-          }
+          enabled: !root.preferenceBusy
+          onClicked: root.setPreference("showAppLogo", !root.showAppLogo)
         }
 
         Button {
@@ -978,17 +863,19 @@ BarWidget {
           bordered: true
           foreground: root.bar ? root.bar.foreground : Color.foreground
           focusable: true
-          enabled: !textPreference.running
+          enabled: !root.preferenceBusy
           onClicked: root.toggleTrackText()
         }
       }
 
       PanelSeparator {
+        visible: !root.settingsOpen
         foreground: root.bar ? root.bar.foreground : Color.foreground
       }
 
       // Source / Player Switcher Section
       Column {
+        visible: !root.settingsOpen
         width: parent.width
         spacing: Style.space(6)
 
@@ -1062,8 +949,7 @@ BarWidget {
               var a = player.trackArtist || (player.metadata && player.metadata["xesam:artist"]) || ""
               return MediaModel.cleanArtist(a, t, player)
             }
-            // Same Repeater-delegate stale-hover issue as the flow-mode buttons above.
-            property bool hovered: false
+                property bool hovered: false
 
             width: parent.width
             height: Style.space(54)
@@ -1110,50 +996,13 @@ BarWidget {
                   width: parent.width
                 }
 
-                Item {
-                  id: sourceTrackClip
+                MarqueeText {
                   width: parent.width
-                  height: sourceTrack.implicitHeight
-                  clip: true
-                  readonly property real overflow: Math.max(0, sourceTrack.implicitWidth - width)
-
-                  Text {
-                    id: sourceTrack
-                    text: sourceRow.track + (sourceRow.artistName && sourceRow.artistName !== sourceRow.name ? " — " + sourceRow.artistName : "")
-                    textFormat: Text.PlainText
-                    color: Util.alpha(root.bar ? root.bar.foreground : Color.foreground, 0.65)
-                    font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                    font.pixelSize: Style.font.caption
-                    onTextChanged: {
-                      x = 0
-                      if (sourceTrackScroll.running) sourceTrackScroll.restart()
-                    }
-                  }
-
-                  SequentialAnimation {
-                    id: sourceTrackScroll
-                    running: root.popupOpen && (sourceRow.hovered || sourceStatus.hot) && sourceTrackClip.overflow > 0 && !Style.reduceMotion
-                    loops: Animation.Infinite
-                    onStopped: sourceTrack.x = 0
-                    PauseAnimation { duration: 1800 }
-                    NumberAnimation {
-                      target: sourceTrack
-                      property: "x"
-                      from: 0
-                      to: -sourceTrackClip.overflow
-                      duration: Math.max(1800, sourceTrackClip.overflow * 35)
-                      easing.type: Easing.Linear
-                    }
-                    PauseAnimation { duration: 1800 }
-                    NumberAnimation {
-                      target: sourceTrack
-                      property: "x"
-                      from: -sourceTrackClip.overflow
-                      to: 0
-                      duration: Math.max(1800, sourceTrackClip.overflow * 35)
-                      easing.type: Easing.Linear
-                    }
-                  }
+                  text: sourceRow.track + (sourceRow.artistName && sourceRow.artistName !== sourceRow.name ? " — " + sourceRow.artistName : "")
+                  color: Util.alpha(root.bar ? root.bar.foreground : Color.foreground, 0.65)
+                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                  font.pixelSize: Style.font.caption
+                  animationEnabled: root.popupOpen && !root.settingsOpen && (sourceRow.hovered || sourceStatus.hot) && !Style.reduceMotion
                 }
               }
 

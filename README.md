@@ -14,8 +14,8 @@ Forked from [Clifford Baidoo’s Omarchy Music Flow](https://github.com/Clifford
 - Independent bar controls for artwork, app logo, and track text. Animation and display choices survive shell restarts.
 - Artwork at the left of the bar, separate from the animation, with a player-icon fallback when artwork is loading or unavailable.
 - Floating player with artwork, metadata, previous/next controls, play/pause, and per-app volume when a matching PipeWire stream is available.
-- Player cards with individual play/pause controls and hover scrolling for long track names.
-- Elapsed/total track time and seeking for players that support position and duration. Non-seekable tracks show read-only progress; unknown-duration streams omit it.
+- Long title, artist, and album text scrolls automatically in the floating player. Player cards retain hover-only scrolling, with a pause at each end.
+- Detected live streams show a LIVE indicator. Seeking and timestamps are intentionally omitted.
 - Widget visible while playing or paused; hidden when playback stops or the player closes.
 
 Playback controls depend on the capabilities exposed by each app through MPRIS. Website names are detected from available media metadata; a browser wrapper may therefore appear as Chrome or Firefox.
@@ -24,11 +24,11 @@ Playback controls depend on the capabilities exposed by each app through MPRIS. 
 
 - Omarchy with its Quickshell shell and Hyprland session.
 - PipeWire/WirePlumber and a PulseAudio-compatible server such as `pipewire-pulse`.
-- `cava`, `curl`, Python 3, and Bash.
+- `cava`, `curl`, and Python 3.
 - An MPRIS-compatible media player or browser session.
 - Optional: `mpv-mpris` for MPV playback integration.
 
-CAVA analyzes the **default playback output**, so other applications playing through that output also affect the visualization. It does not record audio to disk or read the microphone. Artwork is fetched from the player-provided URL and cached locally.
+CAVA analyzes the **default playback output**, so other applications playing through that output also affect the visualization. It does not record audio to disk or read the microphone. Artwork is fetched from the player-provided URL and cached locally. Firefox’s dedicated MPRIS artwork cache is supported. For Twitch live channels, the plugin tries the public Twitch CDN preview for the stream, then browser artwork if the preview is unavailable; the player icon remains the final fallback. This does not require Twitch credentials or API tokens. Live detection depends on the URL and duration exposed by the browser; missing metadata can limit detection.
 
 ## Install
 
@@ -96,6 +96,9 @@ For a development checkout linked into the plugin directory, pull changes in tha
 
 ```text
 BarWidget.qml                  Bar widget and floating player
+MarqueeText.qml                Scrolling metadata component
+Artwork.qml                    Shared, cancellable artwork requests
+artwork.py                     Bounded artwork fetcher and private cache
 Service.qml                    MPRIS, PipeWire, artwork, and CAVA service
 MediaModel.js                  Player matching and metadata helpers
 AudioSpectrum.js               Audio attack/release envelope
@@ -109,13 +112,22 @@ QML entry points stay at the repository root because the shell loads them from t
 
 ## Validation
 
-The fork uses the globally namespaced ID `io.github.alwaysread.music-flow`. Marketplace compatibility and security-baseline checks are run against an exact published commit. A passing local check is not marketplace approval; listing still requires the marketplace’s maintainer review. A preview image is optional.
+This checkout is maintained for local use; no marketplace submission is required. Validation uses Omarchy’s manifest checker, syntax checks, malformed-input checks, and isolated playback fixtures. Temporary audit tests are kept outside the plugin repository.
 
 ```bash
 omarchy plugin validate .
-qmllint BarWidget.qml Service.qml
+qmllint BarWidget.qml Service.qml Artwork.qml MarqueeText.qml
+node --check MediaModel.js
+node --check AudioSpectrum.js
+python3 -c 'import ast; ast.parse(open("artwork.py").read())'
 omarchy-shell io.github.alwaysread.music-flow status
 ```
+
+## Artwork boundaries
+
+Artwork accepts supported raster formats only, with a 2 MiB download limit, dimensions up to 4096 per side and 4 megapixels total. HTTPS requests use an exact CDN allowlist, public DNS addresses pinned for each request, timeouts, and no redirects or proxy settings. Local files are restricted to artwork/cache locations, checked for ownership, and opened without following symlinks. Unsupported or unavailable artwork falls back to the player icon.
+
+The private cache stores up to 32 completed, content-addressed images. Requests are serialized and cancelled when the track changes, so an old request cannot replace the current thumbnail. Image headers are checked before Qt decodes them; this does not replace keeping Qt and system image libraries updated. Playback commands retain the selected MPRIS session, and an expired explicit target cannot control a different player. Display preference writes are serialized and restored from saved configuration after completion or failure.
 
 ## License
 

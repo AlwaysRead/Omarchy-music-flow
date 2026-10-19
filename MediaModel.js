@@ -27,7 +27,7 @@ function playerCanControl(player) {
 }
 
 function canHandleAction(player, action) {
-  if (!player) return false
+  if (!player || player.canControl === false) return false
   if (action === "next") return !!player.canGoNext
   if (action === "previous") return !!player.canGoPrevious
   if (action === "play") return !!(player.canPlay || player.canTogglePlaying)
@@ -135,7 +135,7 @@ var APP_FAMILY_MAP = {
   "firefox": ["firefox", "zen", "zen-bin", "librewolf", "floorp", "waterfox", "tor-browser", "gecko"],
   "zen": ["zen", "zen-bin", "firefox", "gecko"],
   "librewolf": ["librewolf", "firefox", "gecko"],
-  "chromium": ["chromium", "chrome", "google-chrome", "google-chrome-stable", "brave", "brave-browser", "edge", "microsoft-edge", "opera", "vivaldi", "electron"],
+  "chromium": ["chromium", "chrome", "google-chrome", "google-chrome-stable", "brave", "brave-browser", "edge", "microsoft-edge", "opera", "vivaldi"],
   "chrome": ["chrome", "google-chrome", "google-chrome-stable", "chromium"],
   "brave": ["brave", "brave-browser", "chromium"],
   "spotify": ["spotify", "spotify-launcher", "spotify-client"],
@@ -157,12 +157,12 @@ function areAppsInSameFamily(nameA, nameB) {
   var a = normalizeAppName(nameA)
   var b = normalizeAppName(nameB)
   if (!a || !b) return false
-  if (a === b || a.indexOf(b) !== -1 || b.indexOf(a) !== -1) return true
+  if (a === b) return true
 
   for (var family in APP_FAMILY_MAP) {
     var members = APP_FAMILY_MAP[family]
-    var aInFamily = members.some(function(m) { return a.indexOf(normalizeAppName(m)) !== -1 })
-    var bInFamily = members.some(function(m) { return b.indexOf(normalizeAppName(m)) !== -1 })
+    var aInFamily = members.some(function(m) { return a === normalizeAppName(m) || a.endsWith(normalizeAppName(m)) })
+    var bInFamily = members.some(function(m) { return b === normalizeAppName(m) || b.endsWith(normalizeAppName(m)) })
     if (aInFamily && bInFamily) return true
   }
 
@@ -191,7 +191,7 @@ function playerHasPlaybackStream(player, playbackStreams) {
     var sKey = streamLabelKey(sLabel)
     if (!sKey) continue
 
-    if (sKey === pKey || sKey.indexOf(pKey) !== -1 || pKey.indexOf(sKey) !== -1) return true
+    if (pKey && sKey === pKey) return true
     if (areAppsInSameFamily(pLabel, sLabel) || areAppsInSameFamily(pDbus, sLabel)) return true
 
     var p = nodeProps(sNode)
@@ -215,7 +215,7 @@ function streamMatchesPlayer(player, sNode) {
   var p = nodeProps(sNode)
   var binary = String(p["application.process.binary"] || "")
 
-  return (sKey && (sKey === pKey || sKey.indexOf(pKey) !== -1 || pKey.indexOf(sKey) !== -1))
+  return (sKey && pKey && sKey === pKey)
     || areAppsInSameFamily(pLabel, sLabel)
     || areAppsInSameFamily(pDbus, sLabel)
     || (binary && (areAppsInSameFamily(pLabel, binary) || areAppsInSameFamily(pDbus, binary)))
@@ -238,30 +238,6 @@ function findPlayerStream(player, playbackStreams) {
   }
 
   return fallback
-}
-
-function matchingActiveStreams(player, playbackStreams) {
-  // Same matching rules as findPlayerStream, but returns every non-corked,
-  // non-muted match instead of just the first. A player like a browser can have
-  // several simultaneous streams (multiple tabs/windows playing audio at once),
-  // all reporting as the same generic app name with no per-tab PipeWire property
-  // to tell them apart - the first match (what findPlayerStream/volume control
-  // uses) isn't necessarily the one actually producing sound. Used for peak
-  // monitoring, where picking the loudest of all matches instead of just the
-  // first one matters.
-  if (!player) return []
-  var streams = Array.isArray(playbackStreams) ? playbackStreams : []
-  var out = []
-  for (var i = 0; i < streams.length; i++) {
-    var sNode = streams[i]
-    if (!sNode || !streamMatchesPlayer(player, sNode)) continue
-    var p = nodeProps(sNode)
-    var isCorked = p["pulse.corked"] === "true" || p["pulse.corked"] === true
-    var isMuted = sNode.audio && sNode.audio.muted
-    if (isCorked || isMuted) continue
-    out.push(sNode)
-  }
-  return out
 }
 
 function playerHasActiveStream(player, playbackStreams) {
@@ -289,34 +265,22 @@ function playerHasActiveStream(player, playbackStreams) {
 
 function playerKey(player) {
   if (!player) return ""
-  return String(player.dbusName || player.desktopEntry || player.identity || "")
+  return capText(player.dbusName || player.desktopEntry || player.identity || "", 512)
 }
 
 function playerCanonicalKey(player) {
-  if (!player) return ""
-  var dbus = String(player.dbusName || "").toLowerCase()
-  var desktop = String(player.desktopEntry || "").toLowerCase()
-  var identity = String(player.identity || "").toLowerCase()
-  var appName = String(player.appName || "").toLowerCase()
-
-  var base = dbus.replace(/^org\.mpris\.mediaplayer2\./, "")
-  base = base.replace(/[\._]instance.*$/, "")
-  base = base.replace(/[^a-z0-9]/g, "")
-
-  if (base) return base
-  if (desktop) return desktop.replace(/[^a-z0-9]/g, "")
-  if (identity) return identity.replace(/[^a-z0-9]/g, "")
-  if (appName) return appName.replace(/[^a-z0-9]/g, "")
-  return playerKey(player)
+  // A bus name identifies an MPRIS session. Do not collapse different browser
+  // instances: playback controls must retain the exact player selected by the user.
+  return capText(playerKey(player), 512).toLowerCase()
 }
 
 function trackSignature(player) {
   if (!player) return ""
   return [
-    player.trackTitle || "",
-    player.trackArtist || "",
-    player.trackAlbum || "",
-    player.trackArtUrl || ""
+    capText(player.trackTitle),
+    capText(player.trackArtist),
+    capText(player.trackAlbum),
+    capText(player.trackArtUrl)
   ].join("\u001f")
 }
 
@@ -335,13 +299,16 @@ var MAX_TEXT_LENGTH = 4096
 // unlike bus names) before it's run through the regex cascades below and in
 // cleanTitle/detectPlatform.
 function capText(raw, maxLen) {
+  if (Array.isArray(raw)) raw = raw.slice(0, 16).map(function(value) {
+    return Array.isArray(value) ? "" : String(value === null || value === undefined ? "" : value).slice(0, 256)
+  }).join(", ")
   var s = (raw === null || raw === undefined) ? "" : String(raw)
   var limit = maxLen || MAX_TEXT_LENGTH
   return s.length > limit ? s.slice(0, limit) : s
 }
 
-// Strips HTML/XML markup, scripts, control characters, and angle brackets so
-// strings are guaranteed safe when rendered in Text sinks (PlainText or AutoText)
+// Bound metadata and remove markup and control characters for plain-text labels.
+// Shared AutoText sinks additionally require safeSharedText below.
 function sanitizeText(raw) {
   if (raw === null || raw === undefined) return ""
   var text = capText(raw)
@@ -356,12 +323,18 @@ function sanitizeText(raw) {
   text = text.replace(/<[^>]*>/g, "")
 
   // 3. Strip remaining isolated angle brackets, control characters, and non-printable characters
-  text = text.replace(/[<>\x00-\x1f\x7f]/g, "")
+  text = text.replace(/[<>\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, "")
 
   // 4. Normalize multiple whitespace sequences
   text = text.replace(/\s{2,}/g, " ")
 
   return text.trim()
+}
+
+// Shared Omarchy tooltip/OSD sinks may use AutoText. Remove entity introducers
+// as well as markup so encoded tags cannot change how those sinks render.
+function safeSharedText(raw) {
+  return sanitizeText(raw).replace(/&/g, "")
 }
 
 // Cleans up common ugly tags from media titles (e.g. YouTube, Animepahe, movie/music titles)
@@ -419,7 +392,7 @@ function cleanTitle(rawTitle, rawArtist) {
 function cleanArtist(rawArtist, rawTitle, player) {
   var artist = ""
   if (rawArtist) {
-    if (Array.isArray(rawArtist)) artist = rawArtist.map(sanitizeText).join(", ")
+    if (Array.isArray(rawArtist)) artist = rawArtist.slice(0, 16).map(sanitizeText).join(", ")
     else artist = sanitizeText(rawArtist)
   }
 
@@ -465,6 +438,8 @@ var ALLOWED_HTTPS_CDN_DOMAINS = [
   // YouTube
   "i.ytimg.com",
   "img.youtube.com",
+  // Twitch stream previews and browser-provided artwork
+  "static-cdn.jtvnw.net",
   // Spotify
   "i.scdn.co",
   "image-cdn-ak.spotifycdn.com",
@@ -530,8 +505,9 @@ function isAllowedLocalPath(path) {
     path.indexOf("/usr/share/icons/") === 0 ||
     path.indexOf("/usr/share/pixmaps/") === 0
   )
+  var isFirefoxMpris = /\/(?:\.config\/mozilla\/firefox|\.mozilla\/firefox)\/firefox-mpris\/[a-zA-Z0-9_-]+\.png$/.test(path)
 
-  if (!isCacheOrTemp && !isSystemIcon) return false
+  if (!isCacheOrTemp && !isSystemIcon && !isFirefoxMpris) return false
 
   // Strictly raster image file extensions only (no SVG)
   var allowedRasterExtensions = /\.(png|jpe?g|webp|gif|bmp|ico)$/i
@@ -547,46 +523,18 @@ function isAllowedLocalPath(path) {
 }
 
 function isAllowedHttpsUrl(urlString) {
-  if (!urlString || typeof urlString !== "string") return false
-  if (urlString.length > MAX_URL_LENGTH) return false
-  if (/[\x00-\x1f\x7f\s]/.test(urlString)) return false
-  if (urlString.indexOf("https://") !== 0) return false
-
-  // Disallow SVG URLs to prevent active XML / resource-referencing decoding
-  if (/\.svg(?:z)?(?:[\?#]|$)/i.test(urlString)) return false
-
-  // Parse authority
-  var withoutScheme = urlString.slice(8)
-  var slashIndex = withoutScheme.indexOf("/")
-  var hostAndPort = slashIndex === -1 ? withoutScheme : withoutScheme.slice(0, slashIndex)
-
-  // Reject userinfo (e.g. https://user:pass@host)
-  if (hostAndPort.indexOf("@") !== -1) return false
-
-  // Reject non-standard ports
-  var portIndex = hostAndPort.indexOf(":")
-  var host = (portIndex === -1 ? hostAndPort : hostAndPort.slice(0, portIndex)).toLowerCase()
-  if (portIndex !== -1) {
-    var port = hostAndPort.slice(portIndex + 1)
-    if (port !== "443") return false
-  }
-
-  // Reject IP literals and local hostnames to prevent SSRF
-  if (/^(?:\d{1,3}\.){3}\d{1,3}$/.test(host)) return false
-  if (host.indexOf("[") !== -1 || host.indexOf("]") !== -1) return false
-  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal") || host.endsWith(".lan")) return false
-
-  // Must match trusted CDN domain whitelist
-  return ALLOWED_HTTPS_CDN_DOMAINS.some(function(domain) {
-    return host === domain || host.endsWith("." + domain)
-  })
+  if (typeof urlString !== "string" || urlString.length > MAX_URL_LENGTH
+      || /[\x00-\x20\x7f\\]/.test(urlString)) return false
+  if (/\.svg(?:z)?(?:[?#]|$)/i.test(urlString)) return false
+  var match = urlString.match(/^https:\/\/([a-z0-9.-]+)(?::443)?(?=\/|[?#]|$)/i)
+  return Boolean(match && ALLOWED_HTTPS_CDN_DOMAINS.indexOf(match[1].toLowerCase()) >= 0)
 }
 
 function isRasterDataUri(rawUrl) {
   if (!rawUrl || typeof rawUrl !== "string") return false
   if (rawUrl.length > MAX_DATA_IMAGE_LENGTH) return false
 
-  var match = rawUrl.match(/^data:image\/(?:png|jpe?g|webp|gif|bmp);base64,([A-Za-z0-9+/=]+)$/i)
+  var match = rawUrl.match(/^data:image\/(?:png|jpe?g|webp|gif|bmp);base64,((?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?)$/i)
   if (!match) return false
 
   var b64 = match[1]
@@ -610,7 +558,9 @@ function isRasterDataUri(rawUrl) {
 // Validates artwork URI against strictly permitted image schemes, safe CDN hosts, and byte limits
 function sanitizeArtUrl(rawUrl) {
   if (!rawUrl) return ""
-  var url = String(rawUrl).trim()
+  var raw = String(rawUrl)
+  if (raw.length > MAX_DATA_IMAGE_LENGTH) return ""
+  var url = raw.trim()
   if (!url) return ""
 
   // Reject control characters and newlines
@@ -627,9 +577,10 @@ function sanitizeArtUrl(rawUrl) {
   // 2. Local file URIs: file:///...
   if (url.indexOf("file://") === 0) {
     var path = url.slice(7)
-    try { path = decodeURIComponent(path) } catch (e) {}
+    if (/[?#]/.test(path)) return ""
+    try { path = decodeURIComponent(path) } catch (e) { return "" }
     if (isAllowedLocalPath(path)) {
-      return "file://" + path
+      return "file://" + path.split("/").map(encodeURIComponent).join("/")
     }
     return ""
   }
@@ -637,7 +588,7 @@ function sanitizeArtUrl(rawUrl) {
   // 3. Absolute local filesystem paths: /...
   if (url.charAt(0) === "/") {
     if (isAllowedLocalPath(url)) {
-      return "file://" + url
+      return "file://" + url.split("/").map(encodeURIComponent).join("/")
     }
     return ""
   }
@@ -653,9 +604,42 @@ function sanitizeArtUrl(rawUrl) {
   return ""
 }
 
-// Robust artwork extraction with YouTube thumbnail fallback and scheme/destination validation
-function extractArtUrl(player) {
+function twitchChannel(player) {
   if (!player) return ""
+  var meta = player.metadata || {}
+  var url = capText(meta["xesam:url"] || player.url, MAX_URL_LENGTH).toLowerCase()
+  var match = url.match(/^https:\/\/(?:www\.|m\.)?twitch\.tv\/([a-z0-9_]{1,25})\/?(?:[?#].*)?$/)
+  if (match) {
+    var reserved = ["videos", "directory", "downloads", "search", "settings", "subscriptions", "inventory", "wallet", "turbo", "jobs", "p", "store", "dashboard", "clips", "collections", "following", "moderator", "login", "signup"]
+    return reserved.indexOf(match[1]) < 0 ? match[1] : ""
+  }
+  if (/^https:\/\/player\.twitch\.tv\//.test(url)) {
+    var channel = url.match(/[?&]channel=([a-z0-9_]{1,25})(?:&|$)/)
+    return channel ? channel[1] : ""
+  }
+  return ""
+}
+
+function isLiveStream(player) {
+  if (!player) return false
+  if (twitchChannel(player)) return true
+  var meta = player.metadata || {}
+  var url = capText(meta["xesam:url"] || player.url, MAX_URL_LENGTH).toLowerCase()
+  if (!/^https:\/\/(?:www\.|m\.)?youtube\.com\/(?:watch\?|live\/)/.test(url)) return false
+  // Missing duration also occurs on ordinary videos. Only the browser's
+  // explicit unbounded-duration sentinel is evidence of a live timeline.
+  var metadataLength = Number(meta["mpris:length"])
+  var length = Number(player.length)
+  return metadataLength >= 1e18
+    || (player.lengthSupported === true && (length >= 1e12 || length === Infinity))
+}
+
+// Twitch channel previews show the live video; player artwork is the fallback.
+function extractArtUrl(player, playerArtworkOnly) {
+  if (!player) return ""
+  var liveChannel = twitchChannel(player)
+  if (liveChannel && !playerArtworkOnly)
+    return sanitizeArtUrl("https://static-cdn.jtvnw.net/previews-ttv/live_user_" + liveChannel + "-320x180.jpg")
 
   var candidate = ""
   if (player.trackArtUrl) {
@@ -674,9 +658,12 @@ function extractArtUrl(player) {
     if (candidate) return candidate
   }
 
+  if (playerArtworkOnly) return ""
   var url = capText(meta["xesam:url"] || player.url, MAX_URL_LENGTH)
   if (url) {
-    var ytMatch = url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([a-zA-Z0-9_-]{11})/)
+    var ytMatch = url.match(/^https:\/\/(?:www\.|m\.)?youtube\.com\/watch\?(?:[^#]*&)?v=([a-zA-Z0-9_-]{11})(?:[&#]|$)/)
+      || url.match(/^https:\/\/youtu\.be\/([a-zA-Z0-9_-]{11})(?:[?&#]|$)/)
+      || url.match(/^https:\/\/(?:www\.|m\.)?youtube\.com\/(?:live|shorts)\/([a-zA-Z0-9_-]{11})(?:[?&#]|$)/)
     if (ytMatch && ytMatch[1]) {
       return sanitizeArtUrl("https://i.ytimg.com/vi/" + ytMatch[1] + "/hqdefault.jpg")
     }
@@ -707,7 +694,7 @@ function detectPlatform(player) {
 
   // 3. Twitch
   if (url.indexOf("twitch.tv") !== -1 || rawTitle.indexOf("twitch") !== -1) {
-    return { name: "Twitch", icon: "󰕧" }
+    return { name: "Twitch", icon: "󰕃" }
   }
 
   // 4. SoundCloud & Bandcamp
@@ -789,18 +776,20 @@ if (typeof module !== "undefined") {
     playerHasPlaybackStream: playerHasPlaybackStream,
     playerHasActiveStream: playerHasActiveStream,
     findPlayerStream: findPlayerStream,
-    matchingActiveStreams: matchingActiveStreams,
     playerKey: playerKey,
     playerCanonicalKey: playerCanonicalKey,
     trackSignature: trackSignature,
     trackChanged: trackChanged,
     sanitizeText: sanitizeText,
+    safeSharedText: safeSharedText,
     cleanTitle: cleanTitle,
     cleanArtist: cleanArtist,
     cleanAlbum: cleanAlbum,
     isRasterDataUri: isRasterDataUri,
     sanitizeArtUrl: sanitizeArtUrl,
     extractArtUrl: extractArtUrl,
+    twitchChannel: twitchChannel,
+    isLiveStream: isLiveStream,
     detectPlatform: detectPlatform,
     sourceName: sourceName,
     sourceIcon: sourceIcon,

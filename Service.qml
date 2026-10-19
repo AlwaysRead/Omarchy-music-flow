@@ -59,23 +59,38 @@ Item {
   property real spectrumEnergy: 0
   property bool spectrumReady: false
   readonly property real audioLevel: spectrumEnergy
+  property int spectrumFailures: 0
+
+  function clearSpectrum() {
+    root.spectrum = []
+    root.spectrumEnergy = 0
+    root.spectrumReady = false
+  }
+
+  function syncSpectrumProcess() {
+    spectrumRetry.stop()
+    root.spectrumFailures = 0
+    spectrumProcess.running = root.isPlaying
+    if (!root.isPlaying) clearSpectrum()
+  }
+
+  onIsPlayingChanged: Qt.callLater(syncSpectrumProcess)
+
+  Timer {
+    id: spectrumRetry
+    interval: Math.min(8000, 1000 * Math.pow(2, Math.max(0, root.spectrumFailures - 1)))
+    onTriggered: if (root.isPlaying) spectrumProcess.running = true
+  }
 
   Process {
     id: spectrumProcess
-    command: ["cava", "-p", Qt.resolvedUrl("config/visualizer.conf").toString().replace(/^file:\/\//, "")]
-    running: root.isPlaying
+    command: ["cava", "-p", decodeURIComponent(Qt.resolvedUrl("config/visualizer.conf").toString().replace(/^file:\/\//, ""))]
     stdout: SplitParser {
       splitMarker: "\n"
       onRead: function(line) {
-        var parts = line.trim().split(";").filter(function(v) { return v !== "" })
-        if (parts.length !== 16) return
-        var bands = []
-        for (var i = 0; i < parts.length; i++) {
-          if (!/^\d{1,3}$/.test(parts[i])) return
-          var value = Number(parts[i])
-          if (value > 100) return
-          bands.push(value / 100)
-        }
+        var bands = AudioSpectrum.parse(line)
+        if (!bands) return
+        root.spectrumFailures = 0
         bands = AudioSpectrum.smooth(root.spectrum, bands)
         var sum = 0
         for (var b = 0; b < bands.length; b++) sum += bands[b] * bands[b]
@@ -85,12 +100,18 @@ Item {
         spectrumTimeout.restart()
       }
     }
-    onExited: { root.spectrum = []; root.spectrumEnergy = 0; root.spectrumReady = false }
+    onExited: {
+      root.clearSpectrum()
+      if (root.isPlaying && root.spectrumFailures < 3) {
+        root.spectrumFailures++
+        spectrumRetry.restart()
+      }
+    }
   }
   Timer {
     id: spectrumTimeout
     interval: 500
-    onTriggered: { root.spectrum = []; root.spectrumEnergy = 0; root.spectrumReady = false }
+    onTriggered: root.clearSpectrum()
   }
 
   readonly property var sourcePlayers: orderedSourcePlayers()
@@ -175,46 +196,12 @@ Item {
   }
 
   readonly property string album: activePlayer && activePlayer.trackAlbum ? MediaModel.cleanAlbum(activePlayer.trackAlbum) : (activePlayer && activePlayer.metadata && activePlayer.metadata["xesam:album"] ? MediaModel.cleanAlbum(activePlayer.metadata["xesam:album"]) : "")
-  property string verifiedArtUrl: ""
   readonly property string rawCandidateArtUrl: activePlayer ? MediaModel.extractArtUrl(activePlayer) : ""
-  readonly property string artUrl: verifiedArtUrl
-  readonly property string artworkCachePath: (Quickshell.env("XDG_CACHE_HOME") || (Quickshell.env("HOME") + "/.cache")) + "/omarchy/music-flow/artwork.cache"
-
-  onRawCandidateArtUrlChanged: {
-    var raw = root.rawCandidateArtUrl
-    if (!raw) {
-      artFetchProc.running = false
-      root.verifiedArtUrl = ""
-      return
-    }
-
-    if (MediaModel.isRasterDataUri(raw)) {
-      artFetchProc.running = false
-      root.verifiedArtUrl = raw
-      return
-    }
-
-    root.verifiedArtUrl = ""
-    artFetchProc.running = false
-    artFetchProc.command = [
-      "bash", "-c",
-      "set -euo pipefail; URL=\"$1\"; CACHE_FILE=\"$2\"; CACHE_DIR=\"$(dirname \"$CACHE_FILE\")\"; mkdir -p -m 0700 \"$CACHE_DIR\"; TMP_FILE=$(mktemp -p \"$CACHE_DIR\" artwork.XXXXXX); trap 'rm -f \"${TMP_FILE:-}\"' EXIT; if [[ \"$URL\" =~ ^https:// ]]; then HTTP_CODE=$(curl -sS --connect-timeout 3 --max-time 10 --retry 2 --retry-delay 1 --retry-max-time 25 --max-filesize 2097152 --proto \"=https\" -w \"%{http_code}\" \"$URL\" -o \"$TMP_FILE\" 2>/dev/null || echo \"000\"); if [[ \"$HTTP_CODE\" != \"200\" ]]; then exit 1; fi; elif [[ \"$URL\" =~ ^file://(/.*) ]] || [[ \"$URL\" =~ ^(/.*) ]]; then FILE_PATH=\"${BASH_REMATCH[1]}\"; python3 -c '\nimport os,stat,sys\np=sys.argv[1]\nfd=os.open(p,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC)\nst=os.fstat(fd)\nif not(stat.S_ISREG(st.st_mode) and 4<=st.st_size<=2097152):\n os.close(fd)\n sys.exit(1)\nd=os.read(fd,2097152)\nos.close(fd)\nsys.stdout.buffer.write(d)\n' \"$FILE_PATH\" > \"$TMP_FILE\" 2>/dev/null; else exit 1; fi; MAGIC=$(od -N 12 -A n -t x1 \"$TMP_FILE\" 2>/dev/null | tr -d \" \\n\"); if [[ \"$MAGIC\" =~ ^89504e470d0a1a0a ]] || [[ \"$MAGIC\" =~ ^ffd8 ]] || [[ \"$MAGIC\" =~ ^47494638 ]] || [[ \"$MAGIC\" =~ ^424d ]] || [[ \"$MAGIC\" =~ ^52494646.{8}57454250 ]]; then mv -f \"$TMP_FILE\" \"$CACHE_FILE\"; exit 0; else exit 1; fi",
-      "--",
-      raw,
-      root.artworkCachePath
-    ]
-    artFetchProc.running = true
-  }
-
-  Process {
-    id: artFetchProc
-    onExited: function(exitCode) {
-      if (exitCode === 0) {
-        root.verifiedArtUrl = "file://" + root.artworkCachePath + "?t=" + Date.now()
-      } else {
-        root.verifiedArtUrl = ""
-      }
-    }
+  readonly property string artUrl: artwork.url
+  Artwork {
+    id: artwork
+    source: root.rawCandidateArtUrl
+    fallbackSource: root.activePlayer ? MediaModel.extractArtUrl(root.activePlayer, true) : ""
   }
 
   readonly property string identity: activePlayer ? MediaModel.sanitizeText(activePlayer.identity || activePlayer.desktopEntry || "") : ""
@@ -227,14 +214,6 @@ Item {
     return MediaModel.hasMetadata(player)
   }
 
-  function hasTrackMetadata(player) {
-    return MediaModel.hasTrackMetadata(player)
-  }
-
-  function playerCanControl(player) {
-    return MediaModel.playerCanControl(player)
-  }
-
   function canHandleAction(player, action) {
     return MediaModel.canHandleAction(player, action)
   }
@@ -243,50 +222,20 @@ Item {
     return MediaModel.canCycleSource(player)
   }
 
-  function nodeProps(node) {
-    return MediaModel.nodeProps(node)
-  }
-
   function isPlaybackStream(node) {
     return MediaModel.isPlaybackStream(node)
-  }
-
-  function streamLabelKey(label) {
-    return MediaModel.streamLabelKey(label)
-  }
-
-  function rawStreamLabel(node) {
-    return MediaModel.rawStreamLabel(node)
-  }
-
-  function playerAppLabel(player) {
-    return MediaModel.playerAppLabel(player)
-  }
-
-  function playerHasPlaybackStream(player) {
-    return MediaModel.playerHasPlaybackStream(player, playbackStreams)
   }
 
   function playerHasActiveStream(player) {
     return MediaModel.playerHasActiveStream(player, playbackStreams)
   }
 
-  // MPRIS PlaybackStatus can go stale while a player is actually producing audio -
-  // Chromium in particular can report "Stopped" while one of its tabs still has an
-  // unmuted, uncorked PipeWire stream flowing (observed live: 3 active Chromium
-  // audio nodes with MPRIS PlaybackStatus == "Stopped"). But an uncorked stream
-  // alone doesn't mean much - a browser can sit with several idle/silent tabs'
-  // audio contexts open and uncorked with nothing actually playing. Reproduced
-  // live: with Chromium's stale-Stopped tabs treated as equally "active" as a
-  // genuinely-confirmed-playing Spotify, Chromium kept winning selection over
-  // Spotify even while Spotify's own MPRIS said "Playing". Rank real MPRIS
-  // confirmation above the stream fallback so it can never be outranked by it -
-  // the fallback only matters when nothing is genuinely confirmed playing.
-  // 2 = MPRIS-confirmed playing, 1 = active only via the PipeWire-stream
-  // fallback, 0 = not active.
+  // Explicit playback wins over the stream fallback. A paused MPRIS session
+  // stays paused even if a browser leaves a PipeWire stream uncorked.
   function playerActivityRank(player) {
     if (!player) return 0
     if (player.isPlaying) return 2
+    if (player.playbackState === MprisPlaybackState.Paused) return 0
     if (playerHasActiveStream(player)) return 1
     return 0
   }
@@ -304,8 +253,8 @@ Item {
   }
 
   function playerForKey(key) {
-    if (!key) return null
-    var cKey = key.toLowerCase().replace(/[^a-z0-9]/g, "")
+    if (typeof key !== "string" || !key || key.length > 512) return null
+    var cKey = key.toLowerCase()
     for (var i = 0; i < players.length; i++) {
       var p = players[i]
       if (playerKey(p) === key || playerCanonicalKey(p) === cKey) return p
@@ -320,8 +269,8 @@ Item {
   }
 
   function syncPlayingOrder() {
-    var next = {}
-    var alive = {}
+    var next = Object.create(null)
+    var alive = Object.create(null)
     var serial = playSerial
 
     for (var i = 0; i < players.length; i++) {
@@ -350,7 +299,7 @@ Item {
 
   function orderedSourcePlayers() {
     var list = []
-    var seen = {}
+    var seen = Object.create(null)
 
     for (var i = 0; i < players.length; i++) {
       var p = players[i]
@@ -379,7 +328,7 @@ Item {
 
   function orderedCycleSourcePlayers() {
     var list = []
-    var seen = {}
+    var seen = Object.create(null)
 
     for (var i = 0; i < players.length; i++) {
       var p = players[i]
@@ -432,8 +381,8 @@ Item {
           // A different player is actively playing — switch to the actively playing player
           return otherPlaying
         }
-        // Nothing else is playing — keep showing the preferred player (paused)
-        return preferred
+        // Keep a paused selection, but let another paused session replace a stopped one.
+        if (preferred.playbackState === MprisPlaybackState.Paused) return preferred
       }
     }
 
@@ -446,9 +395,12 @@ Item {
     // 3. Nothing is currently playing: stick to last active player if still available
     if (lastActivePlayerKey) {
       var last = playerForKey(lastActivePlayerKey)
-      if (last && hasMetadata(last)) {
-        return last
-      }
+      if (last && hasMetadata(last) && last.playbackState === MprisPlaybackState.Paused) return last
+    }
+    for (var pausedIndex = 0; pausedIndex < players.length; pausedIndex++) {
+      var paused = players[pausedIndex]
+      if (paused && !isProxyPlayer(paused) && hasMetadata(paused)
+          && paused.playbackState === MprisPlaybackState.Paused) return paused
     }
 
     // 4. Fallback: first available non-proxy player with metadata
@@ -460,21 +412,6 @@ Item {
     }
 
     return null
-  }
-
-  function cycleSource() {
-    var list = orderedSourcePlayers()
-    if (list.length <= 1) return false
-    var currentKey = activePlayer ? playerCanonicalKey(activePlayer) : ""
-    var currentIndex = -1
-    for (var i = 0; i < list.length; i++) {
-      if (playerCanonicalKey(list[i]) === currentKey) {
-        currentIndex = i
-        break
-      }
-    }
-    var nextIndex = (currentIndex + 1) % list.length
-    return selectPlayer(playerKey(list[nextIndex]))
   }
 
   function labelFor(player) {
@@ -493,7 +430,7 @@ Item {
     if (!shell) return
     shell.summon("omarchy.osd", JSON.stringify({
       icon: iconName || "media",
-      message: MediaModel.sanitizeText(osdMessage(player || activePlayer, actionLabel))
+      message: MediaModel.safeSharedText(osdMessage(player || activePlayer, actionLabel))
     }))
   }
 
@@ -541,7 +478,7 @@ Item {
   }
 
   function playPlayer(player) {
-    if (!player) return false
+    if (!player || player.canControl === false) return false
     if (player.canPlay) {
       player.play()
       return true
@@ -554,7 +491,7 @@ Item {
   }
 
   function pausePlayer(player) {
-    if (!player) return false
+    if (!player || player.canControl === false) return false
     if (player.canPause) {
       player.pause()
       return true
@@ -603,8 +540,7 @@ Item {
   }
 
   function playerForAction(action, targetKey) {
-    var targeted = playerForKey(targetKey)
-    if (targeted) return targeted
+    if (targetKey) return playerForKey(targetKey)
 
     if (canHandleAction(activePlayer, action)) return activePlayer
 
@@ -618,6 +554,7 @@ Item {
 
   function runAction(action, showFeedback, targetKey) {
     var player = playerForAction(action, targetKey)
+    if (!player || !canHandleAction(player, action)) return false
     var key = playerKey(player)
     var actionLabel = "Play/pause"
     var iconName = "media"
@@ -662,7 +599,7 @@ Item {
       var isCurrentlyPlaying = player && Boolean(player.isPlaying)
       actionLabel = isCurrentlyPlaying ? "Pause" : "Play"
       iconName = isCurrentlyPlaying ? "media-pause" : "media-play"
-      if (player && typeof player.togglePlaying === "function") {
+      if (player && player.canTogglePlaying && typeof player.togglePlaying === "function") {
         player.togglePlaying()
         handled = true
       } else if (player && player.isPlaying && player.canPause) {
@@ -684,7 +621,10 @@ Item {
     return handled
   }
 
-  Component.onCompleted: Qt.callLater(root.syncPlayingOrder)
+  Component.onCompleted: {
+    Qt.callLater(root.syncPlayingOrder)
+    Qt.callLater(root.syncSpectrumProcess)
+  }
   onPlayersChanged: Qt.callLater(root.syncPlayingOrder)
 
   Timer {
@@ -715,6 +655,7 @@ Item {
       playing: playing,
       playingViaStream: playingViaStream,
       serviceIsPlaying: root.isPlaying,
+      isLiveStream: MediaModel.isLiveStream(p),
       audioLevel: root.audioLevel,
       activePlayerStreamFound: root.activePlayerStream !== null,
       spectrumReady: root.spectrumReady,
