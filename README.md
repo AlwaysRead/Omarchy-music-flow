@@ -28,7 +28,7 @@ Playback controls depend on the capabilities exposed by each app through MPRIS. 
 - An MPRIS-compatible media player or browser session.
 - Optional: `mpv-mpris` for MPV playback integration.
 
-CAVA analyzes the **default playback output**, so other applications playing through that output also affect the visualization. It does not record audio to disk or read the microphone. Artwork is fetched from the player-provided URL and cached locally. Firefox’s dedicated MPRIS artwork cache is supported. For Twitch live channels, the plugin tries the public Twitch CDN preview for the stream, then browser artwork if the preview is unavailable; the player icon remains the final fallback. This does not require Twitch credentials or API tokens. Live detection depends on the URL and duration exposed by the browser; missing metadata can limit detection.
+CAVA analyzes the **default playback output**, so other applications playing through that output also affect the visualization. It does not record audio to disk or read the microphone. Artwork is fetched from the player-provided URL and cached locally. Firefox’s dedicated MPRIS artwork cache is supported. For Twitch channels, the plugin reads the channel avatar URL from the public Twitch page and fetches the profile image from Twitch’s CDN. It never substitutes a stream preview; the themed Twitch glyph is the fallback when an avatar cannot be resolved. This does not require Twitch credentials or API tokens. Live detection depends on the URL and duration exposed by the browser; missing metadata can limit detection.
 
 ## Install
 

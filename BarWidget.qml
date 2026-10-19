@@ -610,16 +610,31 @@ BarWidget {
               font.bold: true
               anchors.verticalCenter: parent.verticalCenter
             }
-            Text {
+            Row {
               visible: root.isLiveStream
-              text: localStrings.t("player.live")
               anchors.verticalCenter: parent.verticalCenter
-              leftPadding: Style.space(4)
-              textFormat: Text.PlainText
-              color: Color.accent
-              font.family: root.bar ? root.bar.fontFamily : Style.font.family
-              font.pixelSize: Style.font.caption
-              font.bold: true
+              spacing: Style.space(4)
+              opacity: root.isPlaying ? 1.0 : 0.45
+
+              Item { width: Style.space(4); height: 1 }
+
+              Rectangle {
+                width: Style.space(5)
+                height: width
+                radius: width / 2
+                color: "#ff5c67"
+                anchors.verticalCenter: parent.verticalCenter
+              }
+
+              Text {
+                text: localStrings.t("player.live")
+                textFormat: Text.PlainText
+                color: "#ff5c67"
+                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                anchors.verticalCenter: parent.verticalCenter
+              }
             }
           }
 

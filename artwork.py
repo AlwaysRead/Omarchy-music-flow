@@ -1,6 +1,7 @@
 """Bounded raster-artwork fetcher used by Artwork.qml. No shell execution."""
 import base64
 import hashlib
+from html.parser import HTMLParser
 import ipaddress
 import json
 import os
@@ -103,9 +104,9 @@ def read_local(raw):
         os.close(directory)
 
 
-def read_https(raw):
+def read_https(raw, hosts=HOSTS, limit=MAX_BYTES, timeout=10):
     url = urlsplit(raw)
-    if url.scheme != "https" or url.username or url.password or url.port not in (None, 443) or url.hostname not in HOSTS:
+    if url.scheme != "https" or url.username or url.password or url.port not in (None, 443) or url.hostname not in hosts:
         raise ValueError("untrusted artwork host")
     if any(ord(c) <= 32 or ord(c) == 127 or c == "\\" for c in raw):
         raise ValueError("invalid artwork URL")
@@ -117,15 +118,15 @@ def read_https(raw):
         address = "[" + address + "]"
     # Pin the checked address, disable curlrc/proxies, and never follow redirects.
     command = ["curl", "-q", "--silent", "--show-error", "--fail", "--noproxy", "*",
-               "--connect-timeout", "3", "--max-time", "10", "--max-filesize", str(MAX_BYTES),
+               "--connect-timeout", "3", "--max-time", str(timeout), "--max-filesize", str(limit),
                "--proto", "=https", "--resolve", f"{url.hostname}:443:{address}",
                urlunsplit((url.scheme, url.netloc, url.path, url.query, ""))]
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     try:
-        data = process.stdout.read(MAX_BYTES + 1)
-        if len(data) > MAX_BYTES:
+        data = process.stdout.read(limit + 1)
+        if len(data) > limit:
             raise ValueError("artwork exceeds byte limit")
-        if process.wait(timeout=12) != 0:
+        if process.wait(timeout=timeout + 2) != 0:
             raise ValueError("artwork download failed")
         return data
     finally:
@@ -227,8 +228,36 @@ def store(data):
         os.close(directory)
 
 
+class TwitchAvatarParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.avatar = ""
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        if tag != "meta" or attributes.get("property", "").lower() != "og:image":
+            return
+        candidate = attributes.get("content", "")
+        if re.fullmatch(r"https://static-cdn\.jtvnw\.net/jtv_user_pictures/[A-Za-z0-9_./-]*profile_image[A-Za-z0-9_.-]*\.(?:png|jpe?g|webp)", candidate, re.I):
+            self.avatar = candidate
+
+
+def twitch_avatar(channel):
+    if not re.fullmatch(r"[a-z0-9_]{1,25}", channel):
+        raise ValueError("invalid Twitch channel")
+    page = read_https("https://www.twitch.tv/" + channel,
+                      hosts=frozenset(("www.twitch.tv",)), limit=512 * 1024, timeout=4)
+    parser = TwitchAvatarParser()
+    parser.feed(page.decode("utf-8", errors="replace"))
+    if not parser.avatar:
+        raise ValueError("channel avatar unavailable")
+    return read_https(parser.avatar)
+
+
 def fetch(raw):
-    if raw.startswith("data:"):
+    if raw.startswith("twitch-avatar:"):
+        data = twitch_avatar(raw.removeprefix("twitch-avatar:"))
+    elif raw.startswith("data:"):
         if len(raw) > 256 * 1024:
             raise ValueError("inline artwork exceeds limit")
         match = re.fullmatch(r"data:image/(?:png|jpeg|jpg|gif|webp|bmp);base64,([A-Za-z0-9+/]*={0,2})", raw, re.I)

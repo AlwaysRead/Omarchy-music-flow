@@ -634,12 +634,21 @@ function isLiveStream(player) {
     || (player.lengthSupported === true && (length >= 1e12 || length === Infinity))
 }
 
-// Twitch channel previews show the live video; player artwork is the fallback.
+// Resolve Twitch channel avatars; never substitute a live-video preview.
 function extractArtUrl(player, playerArtworkOnly) {
   if (!player) return ""
   var liveChannel = twitchChannel(player)
-  if (liveChannel && !playerArtworkOnly)
-    return sanitizeArtUrl("https://static-cdn.jtvnw.net/previews-ttv/live_user_" + liveChannel + "-320x180.jpg")
+  if (liveChannel && !playerArtworkOnly) return "twitch-avatar:" + liveChannel
+
+  if (detectPlatform(player).name === "Twitch") {
+    var twitchMeta = player.metadata || {}
+    var avatars = [player.trackArtUrl, twitchMeta["mpris:artUrl"], twitchMeta["xesam:artUrl"]]
+    for (var avatarIndex = 0; avatarIndex < avatars.length; avatarIndex++) {
+      var avatar = sanitizeArtUrl(avatars[avatarIndex])
+      if (/^https:\/\/static-cdn\.jtvnw\.net\/jtv_user_pictures\/[^?#]*profile_image[^?#]*\.(?:png|jpe?g|webp)(?:[?#]|$)/i.test(avatar)) return avatar
+    }
+    return ""
+  }
 
   var candidate = ""
   if (player.trackArtUrl) {
